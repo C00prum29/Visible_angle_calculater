@@ -20,7 +20,7 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
   const cameraRef = useRef<Camera | null>(null);
 
   useEffect(() => {
-    if (!videoRef.current || !canvasRef.current) return;
+    if (!videoRef.current || !canvasRef.current || cameraRef.current) return;
 
     const pose = new Pose({
       locateFile: (file) => {
