@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { PoseDetector } from './components/PoseDetector';
 import { LimbSelector } from './components/LimbSelector';
 import { AngleDisplay } from './components/AngleDisplay';
+import { DataControls } from './components/DataControls';
 import { LimbType } from './types';
 import { Camera } from 'lucide-react';
 
@@ -40,6 +41,7 @@ function App() {
               onLimbChange={setSelectedLimb}
             />
             <AngleDisplay angle={currentAngle} />
+            <DataControls currentAngle={currentAngle} selectedLimb={selectedLimb} />
           </div>
         </div>
 

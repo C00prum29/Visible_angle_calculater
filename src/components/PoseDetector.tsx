@@ -18,9 +18,14 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
   const [error, setError] = useState<string>('');
   const poseRef = useRef<Pose | null>(null);
   const cameraRef = useRef<Camera | null>(null);
+  const selectedLimbRef = useRef<LimbType>(selectedLimb);
 
   useEffect(() => {
-    if (!videoRef.current || !canvasRef.current || cameraRef.current) return;
+    selectedLimbRef.current = selectedLimb;
+  }, [selectedLimb]);
+
+  useEffect(() => {
+    if (!videoRef.current || !canvasRef.current) return;
 
     const pose = new Pose({
       locateFile: (file) => {
@@ -84,7 +89,7 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
 
     if (results.poseLandmarks) {
       const landmarks = results.poseLandmarks as Landmark[];
-      const limbLandmarks = getLimbLandmarks(landmarks, selectedLimb);
+      const limbLandmarks = getLimbLandmarks(landmarks, selectedLimbRef.current);
 
       if (limbLandmarks) {
         const angle = calculateAngle(
