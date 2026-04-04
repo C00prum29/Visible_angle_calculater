@@ -1,7 +1,7 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Download, Save } from 'lucide-react';
 import { LimbType } from '../types';
-import { saveMeasurement, getAllMeasurements, exportToCSV } from '../services/database';
+import { saveMeasurement, getAllMeasurements, exportToCSV, initDatabase, clearAllData } from '../services/database';
 
 interface DataControlsProps {
   currentAngle: number | null;
@@ -12,6 +12,18 @@ export function DataControls({ currentAngle, selectedLimb }: DataControlsProps) 
   const [isSaving, setIsSaving] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  useEffect(() => {
+    initDatabase().catch((err) => {
+      console.error('Failed to initialize database:', err);
+    });
+
+    return () => {
+      clearAllData().catch((err) => {
+        console.error('Failed to clear data on unload:', err);
+      });
+    };
+  }, []);
 
   const handleCapture = async () => {
     if (currentAngle === null) {

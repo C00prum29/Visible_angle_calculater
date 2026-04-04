@@ -38,8 +38,8 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
       smoothLandmarks: true,
       enableSegmentation: false,
       smoothSegmentation: false,
-      minDetectionConfidence: 0.5,
-      minTrackingConfidence: 0.5,
+      minDetectionConfidence: 0.4,
+      minTrackingConfidence: 0.4,
     });
 
     pose.onResults(onResults);
