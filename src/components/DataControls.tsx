@@ -18,9 +18,18 @@ export function DataControls({ currentAngle, selectedLimb }: DataControlsProps) 
       console.error('Failed to initialize database:', err);
     });
 
-    return () => {
+    const handleBeforeUnload = () => {
       clearAllData().catch((err) => {
         console.error('Failed to clear data on unload:', err);
+      });
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      clearAllData().catch((err) => {
+        console.error('Failed to clear data on unmount:', err);
       });
     };
   }, []);

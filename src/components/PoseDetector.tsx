@@ -137,28 +137,30 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
   }
 
   return (
-    <div className="relative">
-      {isLoading && (
-        <div className="absolute inset-0 flex items-center justify-center bg-gray-900 rounded-lg">
-          <p className="text-white text-lg">Загрузка камеры...</p>
-        </div>
-      )}
-      {error && (
-        <div className="absolute inset-0 flex items-center justify-center bg-red-900 rounded-lg">
-          <p className="text-white text-center px-4">{error}</p>
-        </div>
-      )}
-      <video
-        ref={videoRef}
-        className="hidden"
-        playsInline
-      />
-      <canvas
-        ref={canvasRef}
-        width={640}
-        height={480}
-        className="rounded-lg shadow-2xl"
-      />
+    <div className="flex items-center justify-center w-full">
+      <div className="relative">
+        {isLoading && (
+          <div className="absolute inset-0 flex items-center justify-center bg-gray-900 rounded-lg">
+            <p className="text-white text-lg">Загрузка камеры...</p>
+          </div>
+        )}
+        {error && (
+          <div className="absolute inset-0 flex items-center justify-center bg-red-900 rounded-lg">
+            <p className="text-white text-center px-4">{error}</p>
+          </div>
+        )}
+        <video
+          ref={videoRef}
+          className="hidden"
+          playsInline
+        />
+        <canvas
+          ref={canvasRef}
+          width={640}
+          height={480}
+          className="rounded-lg shadow-2xl"
+        />
+      </div>
     </div>
   );
 }
