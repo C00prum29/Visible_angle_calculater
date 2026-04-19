@@ -1,10 +1,45 @@
 import { useEffect, useRef, useState } from 'react';
-import { Pose, Results } from '@mediapipe/pose';
-import { Camera } from '@mediapipe/camera_utils';
-import { drawConnectors, drawLandmarks } from '@mediapipe/drawing_utils';
-import { POSE_CONNECTIONS } from '@mediapipe/pose';
 import { LimbType, Landmark } from '../types';
 import { calculateAngle, getLimbLandmarks } from '../utils/angleCalculator';
+
+declare global {
+  interface Window {
+    Pose: new (config: { locateFile: (file: string) => string }) => {
+      setOptions: (options: Record<string, unknown>) => void;
+      onResults: (callback: (results: PoseResults) => void) => void;
+      send: (input: { image: HTMLVideoElement }) => Promise<void>;
+      close: () => void;
+    };
+    Camera: new (
+      video: HTMLVideoElement,
+      config: {
+        onFrame: () => Promise<void>;
+        width: number;
+        height: number;
+      }
+    ) => {
+      start: () => Promise<void>;
+      stop: () => void;
+    };
+    drawConnectors: (
+      ctx: CanvasRenderingContext2D,
+      landmarks: Landmark[],
+      connections: [number, number][],
+      style: { color: string; lineWidth: number }
+    ) => void;
+    drawLandmarks: (
+      ctx: CanvasRenderingContext2D,
+      landmarks: Landmark[],
+      style: { color: string; lineWidth: number; radius: number }
+    ) => void;
+    POSE_CONNECTIONS: [number, number][];
+  }
+}
+
+interface PoseResults {
+  image: HTMLVideoElement | HTMLCanvasElement | HTMLImageElement;
+  poseLandmarks?: Landmark[];
+}
 
 interface PoseDetectorProps {
   selectedLimb: LimbType;
@@ -16,8 +51,8 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string>('');
-  const poseRef = useRef<Pose | null>(null);
-  const cameraRef = useRef<Camera | null>(null);
+  const poseRef = useRef<ReturnType<typeof window.Pose> | null>(null);
+  const cameraRef = useRef<ReturnType<typeof window.Camera> | null>(null);
   const selectedLimbRef = useRef<LimbType>(selectedLimb);
 
   useEffect(() => {
@@ -27,8 +62,8 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
   useEffect(() => {
     if (!videoRef.current || !canvasRef.current) return;
 
-    const pose = new Pose({
-      locateFile: (file) => {
+    const pose = new window.Pose({
+      locateFile: (file: string) => {
         return `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`;
       },
     });
@@ -45,7 +80,7 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
     pose.onResults(onResults);
     poseRef.current = pose;
 
-    const camera = new Camera(videoRef.current, {
+    const camera = new window.Camera(videoRef.current, {
       onFrame: async () => {
         if (videoRef.current && poseRef.current) {
           await poseRef.current.send({ image: videoRef.current });
@@ -60,7 +95,7 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
       .then(() => {
         setIsLoading(false);
       })
-      .catch((err) => {
+      .catch((err: Error) => {
         setError('Не удалось получить доступ к камере: ' + err.message);
         setIsLoading(false);
       });
@@ -77,7 +112,7 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
     };
   }, []);
 
-  function onResults(results: Results) {
+  function onResults(results: PoseResults) {
     if (!canvasRef.current) return;
 
     const canvasCtx = canvasRef.current.getContext('2d');
@@ -85,7 +120,7 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
 
     canvasCtx.save();
     canvasCtx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
-    canvasCtx.drawImage(results.image, 0, 0, canvasRef.current.width, canvasRef.current.height);
+    canvasCtx.drawImage(results.image as HTMLVideoElement, 0, 0, canvasRef.current.width, canvasRef.current.height);
 
     if (results.poseLandmarks) {
       const landmarks = results.poseLandmarks as Landmark[];
@@ -99,11 +134,11 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
         );
         onAngleUpdate(angle);
 
-        drawConnectors(canvasCtx, results.poseLandmarks, POSE_CONNECTIONS, {
+        window.drawConnectors(canvasCtx, results.poseLandmarks, window.POSE_CONNECTIONS, {
           color: '#00FF00',
           lineWidth: 2,
         });
-        drawLandmarks(canvasCtx, results.poseLandmarks, {
+        window.drawLandmarks(canvasCtx, results.poseLandmarks, {
           color: '#FF0000',
           lineWidth: 1,
           radius: 3,
@@ -114,7 +149,7 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
           limbLandmarks.point2,
           limbLandmarks.point3,
         ];
-        drawLandmarks(canvasCtx, highlightPoints, {
+        window.drawLandmarks(canvasCtx, highlightPoints, {
           color: '#FFD700',
           lineWidth: 2,
           radius: 6,
