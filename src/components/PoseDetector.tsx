@@ -43,7 +43,11 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
     pose.onResults(onResults);
     poseRef.current = pose;
 
+<<<<<<< Updated upstream
     const camera = new Camera(videoRef.current, {
+=======
+    const camera = new window.Camera(videoRef.current, {
+>>>>>>> Stashed changes
       onFrame: async () => {
         if (videoRef.current && poseRef.current) {
           await poseRef.current.send({ image: videoRef.current });
@@ -58,7 +62,11 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
       .then(() => {
         setIsLoading(false);
       })
+<<<<<<< Updated upstream
       .catch((err) => {
+=======
+      .catch((err: Error) => {
+>>>>>>> Stashed changes
         setError('Не удалось получить доступ к камере: ' + err.message);
         setIsLoading(false);
       });
