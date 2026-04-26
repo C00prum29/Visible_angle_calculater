@@ -62,45 +62,62 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
   useEffect(() => {
     if (!videoRef.current || !canvasRef.current) return;
 
-    const pose = new window.Pose({
-      locateFile: (file: string) => {
-        return `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`;
-      },
-    });
+    const waitForMediaPipe = async () => {
+      let attempts = 0;
+      while ((!window.Pose || !window.Camera) && attempts < 50) {
+        await new Promise(r => setTimeout(r, 100));
+        attempts++;
+      }
 
-    pose.setOptions({
-      modelComplexity: 1,
-      smoothLandmarks: true,
-      enableSegmentation: false,
-      smoothSegmentation: false,
-      minDetectionConfidence: 0.4,
-      minTrackingConfidence: 0.4,
-    });
-
-    pose.onResults(onResults);
-    poseRef.current = pose;
-
-    const camera = new window.Camera(videoRef.current, {
-      onFrame: async () => {
-        if (videoRef.current && poseRef.current) {
-          await poseRef.current.send({ image: videoRef.current });
-        }
-      },
-      width: 640,
-      height: 480,
-    });
-
-    camera
-      .start()
-      .then(() => {
+      if (!window.Pose || !window.Camera) {
+        setError('MediaPipe не загрузился. Проверьте интернет-соединение.');
         setIsLoading(false);
-      })
-      .catch((err: Error) => {
-        setError('Не удалось получить доступ к камере: ' + err.message);
-        setIsLoading(false);
+        return;
+      }
+
+      const pose = new window.Pose({
+        locateFile: (file: string) => {
+          return `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`;
+        },
       });
 
-    cameraRef.current = camera;
+      pose.setOptions({
+        modelComplexity: 1,
+        smoothLandmarks: true,
+        enableSegmentation: false,
+        smoothSegmentation: false,
+        minDetectionConfidence: 0.4,
+        minTrackingConfidence: 0.4,
+      });
+
+      pose.onResults(onResults);
+      poseRef.current = pose;
+
+      if (!videoRef.current) return;
+      const camera = new window.Camera(videoRef.current, {
+        onFrame: async () => {
+          if (videoRef.current && poseRef.current) {
+            await poseRef.current.send({ image: videoRef.current });
+          }
+        },
+        width: 640,
+        height: 480,
+      });
+
+      camera
+        .start()
+        .then(() => {
+          setIsLoading(false);
+        })
+        .catch((err: Error) => {
+          setError('Не удалось получить доступ к камере: ' + err.message);
+          setIsLoading(false);
+        });
+
+      cameraRef.current = camera;
+    };
+
+    waitForMediaPipe();
 
     return () => {
       if (cameraRef.current) {
