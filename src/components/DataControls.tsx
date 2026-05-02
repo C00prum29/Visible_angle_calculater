@@ -77,23 +77,23 @@ export function DataControls({ currentAngle, selectedLimb }: DataControlsProps) 
   };
 
   return (
-    <div className="bg-white rounded-lg shadow-lg p-6">
-      <div className="space-y-3">
+    <div className="bg-white rounded-xl shadow-lg p-4 sm:p-6">
+      <div className="space-y-2 sm:space-y-3">
         <button
           onClick={handleCapture}
           disabled={isSaving || currentAngle === null}
-          className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-green-600 text-white rounded-lg font-medium hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
+          className="w-full flex items-center justify-center gap-2 px-4 py-3 sm:py-3 bg-green-600 text-white rounded-lg font-medium hover:bg-green-700 active:bg-green-800 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors text-sm sm:text-base"
         >
-          <Save className="w-5 h-5" />
+          <Save className="w-5 h-5 flex-shrink-0" />
           {isSaving ? 'Сохранение...' : 'Зафиксировать данные'}
         </button>
 
         <button
           onClick={handleExport}
           disabled={isExporting}
-          className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
+          className="w-full flex items-center justify-center gap-2 px-4 py-3 sm:py-3 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 active:bg-blue-800 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors text-sm sm:text-base"
         >
-          <Download className="w-5 h-5" />
+          <Download className="w-5 h-5 flex-shrink-0" />
           {isExporting ? 'Выгрузка...' : 'Выгрузить базу данных'}
         </button>
       </div>

@@ -6,15 +6,15 @@ interface AngleDisplayProps {
 
 export function AngleDisplay({ angle }: AngleDisplayProps) {
   return (
-    <div className="bg-white rounded-lg shadow-lg p-6">
-      <div className="flex items-center gap-3 mb-4">
-        <Activity className="w-6 h-6 text-green-600" />
-        <h2 className="text-xl font-semibold text-gray-800">Угол сгиба</h2>
+    <div className="bg-white rounded-xl shadow-lg p-4 sm:p-6">
+      <div className="flex items-center gap-3 mb-3 sm:mb-4">
+        <Activity className="w-6 h-6 text-green-600 flex-shrink-0" />
+        <h2 className="text-lg sm:text-xl font-semibold text-gray-800">Угол сгиба</h2>
       </div>
       <div className="text-center">
         {angle !== null ? (
           <>
-            <div className="text-6xl font-bold text-blue-600 mb-2">
+            <div className="text-5xl sm:text-6xl font-bold text-blue-600 mb-2">
               {angle}°
             </div>
             <div className="text-sm text-gray-500">
