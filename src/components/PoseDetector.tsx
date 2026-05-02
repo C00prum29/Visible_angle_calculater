@@ -10,17 +10,6 @@ declare global {
       send: (input: { image: HTMLVideoElement }) => Promise<void>;
       close: () => void;
     };
-    Camera: new (
-      video: HTMLVideoElement,
-      config: {
-        onFrame: () => Promise<void>;
-        width: number;
-        height: number;
-      }
-    ) => {
-      start: () => Promise<void>;
-      stop: () => void;
-    };
     drawConnectors: (
       ctx: CanvasRenderingContext2D,
       landmarks: Landmark[],
@@ -52,15 +41,23 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string>('');
   const poseRef = useRef<ReturnType<typeof window.Pose> | null>(null);
-  const cameraRef = useRef<ReturnType<typeof window.Camera> | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const animFrameRef = useRef<number | null>(null);
   const selectedLimbRef = useRef<LimbType>(selectedLimb);
+  const onAngleUpdateRef = useRef(onAngleUpdate);
 
   useEffect(() => {
     selectedLimbRef.current = selectedLimb;
   }, [selectedLimb]);
 
   useEffect(() => {
+    onAngleUpdateRef.current = onAngleUpdate;
+  }, [onAngleUpdate]);
+
+  useEffect(() => {
     if (!videoRef.current || !canvasRef.current) return;
+
+    const video = videoRef.current;
 
     const pose = new window.Pose({
       locateFile: (file: string) => {
@@ -80,31 +77,60 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
     pose.onResults(onResults);
     poseRef.current = pose;
 
-    const camera = new window.Camera(videoRef.current, {
-      onFrame: async () => {
-        if (videoRef.current && poseRef.current) {
-          await poseRef.current.send({ image: videoRef.current });
+    const isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+
+    async function initCamera() {
+      try {
+        // Try with preferred constraints first
+        let stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: isMobile ? 'user' : 'environment',
+            width: { ideal: 640 },
+            height: { ideal: 480 },
+          },
+          audio: false,
+        }).catch(() => null);
+
+        // Fallback: try without constraints
+        if (!stream) {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: true,
+            audio: false,
+          });
         }
-      },
-      width: 640,
-      height: 480,
-    });
 
-    camera
-      .start()
-      .then(() => {
+        streamRef.current = stream;
+        video.srcObject = stream;
+        video.onloadedmetadata = () => {
+          video.play();
+          setIsLoading(false);
+          startLoop();
+        };
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : 'Неизвестная ошибка';
+        setError('Не удалось получить доступ к камере: ' + errMsg);
         setIsLoading(false);
-      })
-      .catch((err: Error) => {
-        setError('Не удалось получить доступ к камере: ' + err.message);
-        setIsLoading(false);
-      });
+      }
+    }
 
-    cameraRef.current = camera;
+    initCamera();
+
+    function startLoop() {
+      const loop = async () => {
+        if (video.readyState >= 2 && poseRef.current) {
+          await poseRef.current.send({ image: video });
+        }
+        animFrameRef.current = requestAnimationFrame(loop);
+      };
+      animFrameRef.current = requestAnimationFrame(loop);
+    }
 
     return () => {
-      if (cameraRef.current) {
-        cameraRef.current.stop();
+      if (animFrameRef.current !== null) {
+        cancelAnimationFrame(animFrameRef.current);
+      }
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((t) => t.stop());
       }
       if (poseRef.current) {
         poseRef.current.close();
@@ -118,13 +144,24 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
     const canvasCtx = canvasRef.current.getContext('2d');
     if (!canvasCtx) return;
 
+    const { width, height } = canvasRef.current;
+
     canvasCtx.save();
-    canvasCtx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
-    canvasCtx.drawImage(results.image as HTMLVideoElement, 0, 0, canvasRef.current.width, canvasRef.current.height);
+    canvasCtx.clearRect(0, 0, width, height);
+
+    // Mirror the canvas horizontally so the user sees a selfie-style view
+    canvasCtx.translate(width, 0);
+    canvasCtx.scale(-1, 1);
+    canvasCtx.drawImage(results.image as HTMLVideoElement, 0, 0, width, height);
+    canvasCtx.restore();
 
     if (results.poseLandmarks) {
       const landmarks = results.poseLandmarks as Landmark[];
-      const limbLandmarks = getLimbLandmarks(landmarks, selectedLimbRef.current);
+
+      // Mirror landmarks for correct overlay on the flipped canvas
+      const mirroredLandmarks = landmarks.map((lm) => ({ ...lm, x: 1 - lm.x }));
+
+      const limbLandmarks = getLimbLandmarks(mirroredLandmarks, selectedLimbRef.current);
 
       if (limbLandmarks) {
         const angle = calculateAngle(
@@ -132,13 +169,13 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
           limbLandmarks.point2,
           limbLandmarks.point3
         );
-        onAngleUpdate(angle);
+        onAngleUpdateRef.current(angle);
 
-        window.drawConnectors(canvasCtx, results.poseLandmarks, window.POSE_CONNECTIONS, {
+        window.drawConnectors(canvasCtx, mirroredLandmarks, window.POSE_CONNECTIONS, {
           color: '#00FF00',
           lineWidth: 2,
         });
-        window.drawLandmarks(canvasCtx, results.poseLandmarks, {
+        window.drawLandmarks(canvasCtx, mirroredLandmarks, {
           color: '#FF0000',
           lineWidth: 1,
           radius: 3,
@@ -155,9 +192,6 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
           radius: 6,
         });
 
-        const width = canvasRef.current.width;
-        const height = canvasRef.current.height;
-
         canvasCtx.strokeStyle = '#FFD700';
         canvasCtx.lineWidth = 4;
         canvasCtx.beginPath();
@@ -167,20 +201,18 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
         canvasCtx.stroke();
       }
     }
-
-    canvasCtx.restore();
   }
 
   return (
     <div className="flex items-center justify-center w-full">
-      <div className="relative">
+      <div className="relative w-full">
         {isLoading && (
-          <div className="absolute inset-0 flex items-center justify-center bg-gray-900 rounded-lg">
+          <div className="absolute inset-0 flex items-center justify-center bg-gray-900 rounded-lg z-10 min-h-[240px]">
             <p className="text-white text-lg">Загрузка камеры...</p>
           </div>
         )}
         {error && (
-          <div className="absolute inset-0 flex items-center justify-center bg-red-900 rounded-lg">
+          <div className="absolute inset-0 flex items-center justify-center bg-red-900 rounded-lg z-10 min-h-[240px]">
             <p className="text-white text-center px-4">{error}</p>
           </div>
         )}
@@ -188,12 +220,13 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
           ref={videoRef}
           className="hidden"
           playsInline
+          muted
         />
         <canvas
           ref={canvasRef}
           width={640}
           height={480}
-          className="rounded-lg shadow-2xl"
+          className="rounded-lg shadow-2xl w-full h-auto"
         />
       </div>
     </div>
