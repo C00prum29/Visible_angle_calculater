@@ -79,16 +79,26 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
 
     const isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 
-    navigator.mediaDevices
-      .getUserMedia({
-        video: {
-          facingMode: isMobile ? 'user' : 'environment',
-          width: { ideal: 640 },
-          height: { ideal: 480 },
-        },
-        audio: false,
-      })
-      .then((stream) => {
+    async function initCamera() {
+      try {
+        // Try with preferred constraints first
+        let stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: isMobile ? 'user' : 'environment',
+            width: { ideal: 640 },
+            height: { ideal: 480 },
+          },
+          audio: false,
+        }).catch(() => null);
+
+        // Fallback: try without constraints
+        if (!stream) {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: true,
+            audio: false,
+          });
+        }
+
         streamRef.current = stream;
         video.srcObject = stream;
         video.onloadedmetadata = () => {
@@ -96,11 +106,14 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
           setIsLoading(false);
           startLoop();
         };
-      })
-      .catch((err: Error) => {
-        setError('Не удалось получить доступ к камере: ' + err.message);
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : 'Неизвестная ошибка';
+        setError('Не удалось получить доступ к камере: ' + errMsg);
         setIsLoading(false);
-      });
+      }
+    }
+
+    initCamera();
 
     function startLoop() {
       const loop = async () => {
