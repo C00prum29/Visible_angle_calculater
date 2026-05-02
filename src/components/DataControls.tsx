@@ -77,30 +77,30 @@ export function DataControls({ currentAngle, selectedLimb }: DataControlsProps) 
   };
 
   return (
-    <div className="bg-white rounded-lg shadow-lg p-6">
-      <div className="space-y-3">
+    <div className="bg-white rounded-lg shadow-lg p-4 md:p-6">
+      <div className="space-y-2 md:space-y-3">
         <button
           onClick={handleCapture}
           disabled={isSaving || currentAngle === null}
-          className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-green-600 text-white rounded-lg font-medium hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
+          className="w-full flex items-center justify-center gap-2 px-3 md:px-4 py-2 md:py-3 bg-green-600 text-white rounded-lg font-medium text-sm md:text-base hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
         >
-          <Save className="w-5 h-5" />
+          <Save className="w-4 md:w-5 h-4 md:h-5" />
           {isSaving ? 'Сохранение...' : 'Зафиксировать данные'}
         </button>
 
         <button
           onClick={handleExport}
           disabled={isExporting}
-          className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
+          className="w-full flex items-center justify-center gap-2 px-3 md:px-4 py-2 md:py-3 bg-blue-600 text-white rounded-lg font-medium text-sm md:text-base hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
         >
-          <Download className="w-5 h-5" />
+          <Download className="w-4 md:w-5 h-4 md:h-5" />
           {isExporting ? 'Выгрузка...' : 'Выгрузить базу данных'}
         </button>
       </div>
 
       {message && (
         <div
-          className={`mt-3 p-3 rounded-lg text-sm font-medium ${
+          className={`mt-2 md:mt-3 p-2 md:p-3 rounded-lg text-xs md:text-sm font-medium ${
             message.type === 'success'
               ? 'bg-green-50 text-green-800 border border-green-200'
               : 'bg-red-50 text-red-800 border border-red-200'

@@ -16,6 +16,7 @@ declare global {
         onFrame: () => Promise<void>;
         width: number;
         height: number;
+        facingMode?: 'user' | 'environment';
       }
     ) => {
       start: () => Promise<void>;
@@ -46,6 +47,10 @@ interface PoseDetectorProps {
   onAngleUpdate: (angle: number) => void;
 }
 
+function isMobileDevice(): boolean {
+  return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+}
+
 export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -54,10 +59,25 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
   const poseRef = useRef<ReturnType<typeof window.Pose> | null>(null);
   const cameraRef = useRef<ReturnType<typeof window.Camera> | null>(null);
   const selectedLimbRef = useRef<LimbType>(selectedLimb);
+  const isMobile = isMobileDevice();
+  const [canvasSize, setCanvasSize] = useState({ width: 640, height: 480 });
 
   useEffect(() => {
     selectedLimbRef.current = selectedLimb;
   }, [selectedLimb]);
+
+  useEffect(() => {
+    if (isMobile) {
+      const updateCanvasSize = () => {
+        const width = Math.min(window.innerWidth - 32, 640);
+        const height = (width * 3) / 4;
+        setCanvasSize({ width, height });
+      };
+      updateCanvasSize();
+      window.addEventListener('resize', updateCanvasSize);
+      return () => window.removeEventListener('resize', updateCanvasSize);
+    }
+  }, [isMobile]);
 
   useEffect(() => {
     if (!videoRef.current || !canvasRef.current) return;
@@ -69,12 +89,13 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
     });
 
     pose.setOptions({
-      modelComplexity: 1,
+      modelComplexity: isMobile ? 0 : 1,
       smoothLandmarks: true,
       enableSegmentation: false,
       smoothSegmentation: false,
       minDetectionConfidence: 0.4,
       minTrackingConfidence: 0.4,
+      staticImageMode: false,
     });
 
     pose.onResults(onResults);
@@ -86,8 +107,9 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
           await poseRef.current.send({ image: videoRef.current });
         }
       },
-      width: 640,
-      height: 480,
+      width: canvasSize.width,
+      height: canvasSize.height,
+      facingMode: 'user',
     });
 
     camera
@@ -110,7 +132,7 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
         poseRef.current.close();
       }
     };
-  }, []);
+  }, [canvasSize]);
 
   function onResults(results: PoseResults) {
     if (!canvasRef.current) return;
@@ -191,9 +213,9 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
         />
         <canvas
           ref={canvasRef}
-          width={640}
-          height={480}
-          className="rounded-lg shadow-2xl"
+          width={canvasSize.width}
+          height={canvasSize.height}
+          className="rounded-lg shadow-2xl w-full h-auto"
         />
       </div>
     </div>

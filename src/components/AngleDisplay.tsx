@@ -6,18 +6,18 @@ interface AngleDisplayProps {
 
 export function AngleDisplay({ angle }: AngleDisplayProps) {
   return (
-    <div className="bg-white rounded-lg shadow-lg p-6">
-      <div className="flex items-center gap-3 mb-4">
-        <Activity className="w-6 h-6 text-green-600" />
-        <h2 className="text-xl font-semibold text-gray-800">Угол сгиба</h2>
+    <div className="bg-white rounded-lg shadow-lg p-4 md:p-6">
+      <div className="flex items-center gap-2 md:gap-3 mb-4">
+        <Activity className="w-5 md:w-6 h-5 md:h-6 text-green-600 flex-shrink-0" />
+        <h2 className="text-lg md:text-xl font-semibold text-gray-800">Угол сгиба</h2>
       </div>
       <div className="text-center">
         {angle !== null ? (
           <>
-            <div className="text-6xl font-bold text-blue-600 mb-2">
+            <div className="text-4xl md:text-6xl font-bold text-blue-600 mb-2">
               {angle}°
             </div>
-            <div className="text-sm text-gray-500">
+            <div className="text-xs md:text-sm text-gray-500">
               {angle < 30 && 'Почти прямая'}
               {angle >= 30 && angle < 90 && 'Небольшой сгиб'}
               {angle >= 90 && angle < 135 && 'Средний сгиб'}
@@ -25,11 +25,11 @@ export function AngleDisplay({ angle }: AngleDisplayProps) {
             </div>
           </>
         ) : (
-          <div className="text-2xl text-gray-400">Ожидание данных...</div>
+          <div className="text-lg md:text-2xl text-gray-400">Ожидание данных...</div>
         )}
       </div>
       <div className="mt-4 pt-4 border-t border-gray-200">
-        <div className="flex justify-between text-sm text-gray-600">
+        <div className="flex justify-between text-xs md:text-sm text-gray-600">
           <span>0°</span>
           <span>90°</span>
           <span>180°</span>
