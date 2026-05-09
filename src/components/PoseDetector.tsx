@@ -7,11 +7,11 @@ declare global {
     Pose: new (config: { locateFile: (file: string) => string }) => {
       setOptions: (options: Record<string, unknown>) => void;
       onResults: (callback: (results: PoseResults) => void) => void;
-      send: (input: { image: HTMLVideoElement }) => Promise<void>;
+      send: (input: { image: HTMLVideoElement | HTMLCanvasElement }) => Promise<void>;
       close: () => void;
     };
     Camera: new (
-      video: HTMLVideoElement,
+      videoElement: HTMLVideoElement,
       config: {
         onFrame: () => Promise<void>;
         width: number;
@@ -64,7 +64,7 @@ function getInitialCanvasSize() {
 export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
+  const cameraCanvasRef = useRef<HTMLCanvasElement>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string>('');
   const poseRef = useRef<ReturnType<typeof window.Pose> | null>(null);
@@ -72,7 +72,7 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
   const selectedLimbRef = useRef<LimbType>(selectedLimb);
   const isMobile = isMobileDevice();
   const [canvasSize, setCanvasSize] = useState(getInitialCanvasSize);
-  const initializedRef = useRef(false);
+  const initRef = useRef(false);
 
   useEffect(() => {
     selectedLimbRef.current = selectedLimb;
@@ -96,12 +96,15 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const canvasCtx = canvas.getContext('2d');
-    if (!canvasCtx) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
 
-    canvasCtx.save();
-    canvasCtx.clearRect(0, 0, canvas.width, canvas.height);
-    canvasCtx.drawImage(results.image as HTMLVideoElement, 0, 0, canvas.width, canvas.height);
+    ctx.save();
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    if (cameraCanvasRef.current) {
+      ctx.drawImage(cameraCanvasRef.current, 0, 0, canvas.width, canvas.height);
+    }
 
     if (results.poseLandmarks) {
       const landmarks = results.poseLandmarks as Landmark[];
@@ -115,17 +118,17 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
         );
         onAngleUpdate(angle);
 
-        window.drawConnectors(canvasCtx, results.poseLandmarks, window.POSE_CONNECTIONS, {
+        window.drawConnectors(ctx, results.poseLandmarks, window.POSE_CONNECTIONS, {
           color: '#00FF00',
           lineWidth: 2,
         });
-        window.drawLandmarks(canvasCtx, results.poseLandmarks, {
+        window.drawLandmarks(ctx, results.poseLandmarks, {
           color: '#FF0000',
           lineWidth: 1,
           radius: 3,
         });
 
-        window.drawLandmarks(canvasCtx, [limbLandmarks.point1, limbLandmarks.point2, limbLandmarks.point3], {
+        window.drawLandmarks(ctx, [limbLandmarks.point1, limbLandmarks.point2, limbLandmarks.point3], {
           color: '#FFD700',
           lineWidth: 2,
           radius: 6,
@@ -134,66 +137,80 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
         const w = canvas.width;
         const h = canvas.height;
 
-        canvasCtx.strokeStyle = '#FFD700';
-        canvasCtx.lineWidth = 4;
-        canvasCtx.beginPath();
-        canvasCtx.moveTo(limbLandmarks.point1.x * w, limbLandmarks.point1.y * h);
-        canvasCtx.lineTo(limbLandmarks.point2.x * w, limbLandmarks.point2.y * h);
-        canvasCtx.lineTo(limbLandmarks.point3.x * w, limbLandmarks.point3.y * h);
-        canvasCtx.stroke();
+        ctx.strokeStyle = '#FFD700';
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(limbLandmarks.point1.x * w, limbLandmarks.point1.y * h);
+        ctx.lineTo(limbLandmarks.point2.x * w, limbLandmarks.point2.y * h);
+        ctx.lineTo(limbLandmarks.point3.x * w, limbLandmarks.point3.y * h);
+        ctx.stroke();
       }
     }
 
-    canvasCtx.restore();
+    ctx.restore();
   }, [onAngleUpdate]);
 
   useEffect(() => {
-    if (!videoRef.current || !canvasRef.current) return;
-    if (initializedRef.current) return;
-    initializedRef.current = true;
+    if (!videoRef.current || !canvasRef.current || !cameraCanvasRef.current) {
+      return;
+    }
 
-    const pose = new window.Pose({
-      locateFile: (file: string) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`,
-    });
+    if (initRef.current) return;
+    initRef.current = true;
 
-    pose.setOptions({
-      modelComplexity: isMobile ? 0 : 1,
-      smoothLandmarks: true,
-      enableSegmentation: false,
-      smoothSegmentation: false,
-      minDetectionConfidence: 0.4,
-      minTrackingConfidence: 0.4,
-      staticImageMode: false,
-    });
+    const initPose = async () => {
+      try {
+        const pose = new window.Pose({
+          locateFile: (file: string) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`,
+        });
 
-    pose.onResults(onResults);
-    poseRef.current = pose;
+        pose.setOptions({
+          modelComplexity: isMobile ? 0 : 1,
+          smoothLandmarks: true,
+          enableSegmentation: false,
+          smoothSegmentation: false,
+          minDetectionConfidence: 0.4,
+          minTrackingConfidence: 0.4,
+          staticImageMode: false,
+        });
 
-    const camera = new window.Camera(videoRef.current, {
-      onFrame: async () => {
-        if (videoRef.current && poseRef.current) {
-          await poseRef.current.send({ image: videoRef.current });
-        }
-      },
-      width: canvasSize.width,
-      height: canvasSize.height,
-      facingMode: 'user',
-    });
+        pose.onResults(onResults);
+        poseRef.current = pose;
 
-    camera
-      .start()
-      .then(() => {
+        const cameraCanvas = cameraCanvasRef.current;
+        const video = videoRef.current;
+
+        if (!cameraCanvas || !video) return;
+
+        const camera = new window.Camera(video, {
+          onFrame: async () => {
+            const ctx = cameraCanvas.getContext('2d');
+            if (ctx && video.videoWidth > 0 && video.videoHeight > 0) {
+              ctx.drawImage(video, 0, 0, cameraCanvas.width, cameraCanvas.height);
+            }
+            if (poseRef.current) {
+              await poseRef.current.send({ image: cameraCanvas });
+            }
+          },
+          width: canvasSize.width,
+          height: canvasSize.height,
+          facingMode: 'user',
+        });
+
+        await camera.start();
+        cameraRef.current = camera;
         setIsLoading(false);
-      })
-      .catch((err: Error) => {
-        setError('Не удалось получить доступ к камере: ' + err.message);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        setError('Не удалось получить доступ к камере: ' + message);
         setIsLoading(false);
-      });
+      }
+    };
 
-    cameraRef.current = camera;
+    initPose();
 
     return () => {
-      initializedRef.current = false;
+      initRef.current = false;
       if (cameraRef.current) {
         cameraRef.current.stop();
       }
@@ -201,11 +218,10 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
         poseRef.current.close();
       }
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [canvasSize, onResults]);
 
   return (
-    <div className="flex items-center justify-center w-full" ref={containerRef}>
+    <div className="flex items-center justify-center w-full">
       <div className="relative bg-gray-900 rounded-lg shadow-2xl overflow-hidden" style={{ width: `${canvasSize.width}px`, maxWidth: '100%', aspectRatio: `${canvasSize.width} / ${canvasSize.height}` }}>
         {isLoading && (
           <div className="absolute inset-0 flex items-center justify-center bg-gray-900 z-10">
@@ -223,6 +239,12 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
           playsInline
           muted
           autoPlay
+        />
+        <canvas
+          ref={cameraCanvasRef}
+          width={canvasSize.width}
+          height={canvasSize.height}
+          className="hidden"
         />
         <canvas
           ref={canvasRef}
