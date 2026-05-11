@@ -248,6 +248,15 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
             facingMode: 'user',
           });
           await camera.start();
+
+          if (video.readyState < 2) {
+            await new Promise((resolve) => {
+              video.onloadedmetadata = () => resolve(true);
+            });
+          }
+
+          await video.play();
+
           cameraRef.current = camera;
           setIsLoading(false);
         }
@@ -302,10 +311,17 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
         )}
         <video
           ref={videoRef}
-          className="hidden"
           playsInline
           muted
           autoPlay
+          webkit-playsinline="true"
+          className="absolute opacity-0 pointer-events-none"
+          style={{
+            width: '1px',
+            height: '1px',
+            top: 0,
+            left: 0,
+          }}
         />
         <canvas
           ref={canvasRef}
