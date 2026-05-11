@@ -64,11 +64,13 @@ function getInitialCanvasSize() {
 export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const cameraCanvasRef = useRef<HTMLCanvasElement>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string>('');
   const poseRef = useRef<ReturnType<typeof window.Pose> | null>(null);
   const cameraRef = useRef<ReturnType<typeof window.Camera> | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const animFrameRef = useRef<number | null>(null);
+  const processingRef = useRef(false);
   const selectedLimbRef = useRef<LimbType>(selectedLimb);
   const isMobile = isMobileDevice();
   const [canvasSize, setCanvasSize] = useState(getInitialCanvasSize);
@@ -102,8 +104,14 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
     ctx.save();
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    if (cameraCanvasRef.current) {
-      ctx.drawImage(cameraCanvasRef.current, 0, 0, canvas.width, canvas.height);
+    // Draw the source image (video frame) passed back by MediaPipe
+    if (results.image) {
+      ctx.drawImage(results.image as CanvasImageSource, 0, 0, canvas.width, canvas.height);
+    } else {
+      const video = videoRef.current;
+      if (video && video.readyState >= 2) {
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      }
     }
 
     if (results.poseLandmarks) {
@@ -148,13 +156,61 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
     }
 
     ctx.restore();
+    processingRef.current = false;
   }, [onAngleUpdate]);
 
-  useEffect(() => {
-    if (!videoRef.current || !canvasRef.current || !cameraCanvasRef.current) {
-      return;
-    }
+  // Mobile path: getUserMedia directly + rAF loop to feed frames to MediaPipe
+  const startMobileCamera = useCallback(async (pose: ReturnType<typeof window.Pose>) => {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    if (!video || !canvas) return;
 
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: { ideal: 'environment' },
+        width: { ideal: canvasSize.width },
+        height: { ideal: canvasSize.height },
+      },
+      audio: false,
+    });
+
+    streamRef.current = stream;
+    video.srcObject = stream;
+
+    await new Promise<void>((resolve, reject) => {
+      video.onloadedmetadata = () => {
+        video.play().then(resolve).catch(reject);
+      };
+      video.onerror = () => reject(new Error('Video error'));
+      setTimeout(() => reject(new Error('Camera timeout')), 10000);
+    });
+
+    setIsLoading(false);
+
+    const loop = async () => {
+      if (!processingRef.current && video.readyState >= 2 && video.videoWidth > 0) {
+        processingRef.current = true;
+
+        // Always show the live video frame on canvas so display is never black
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        }
+
+        try {
+          await pose.send({ image: video });
+        } catch {
+          processingRef.current = false;
+        }
+      }
+      animFrameRef.current = requestAnimationFrame(loop);
+    };
+
+    animFrameRef.current = requestAnimationFrame(loop);
+  }, [canvasSize]);
+
+  useEffect(() => {
+    if (!videoRef.current || !canvasRef.current) return;
     if (initRef.current) return;
     initRef.current = true;
 
@@ -177,29 +233,24 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
         pose.onResults(onResults);
         poseRef.current = pose;
 
-        const cameraCanvas = cameraCanvasRef.current;
-        const video = videoRef.current;
-
-        if (!cameraCanvas || !video) return;
-
-        const camera = new window.Camera(video, {
-          onFrame: async () => {
-            const ctx = cameraCanvas.getContext('2d');
-            if (ctx && video.videoWidth > 0 && video.videoHeight > 0) {
-              ctx.drawImage(video, 0, 0, cameraCanvas.width, cameraCanvas.height);
-            }
-            if (poseRef.current) {
-              await poseRef.current.send({ image: cameraCanvas });
-            }
-          },
-          width: canvasSize.width,
-          height: canvasSize.height,
-          facingMode: 'user',
-        });
-
-        await camera.start();
-        cameraRef.current = camera;
-        setIsLoading(false);
+        if (isMobile) {
+          await startMobileCamera(pose);
+        } else {
+          const video = videoRef.current!;
+          const camera = new window.Camera(video, {
+            onFrame: async () => {
+              if (poseRef.current && video.videoWidth > 0) {
+                await poseRef.current.send({ image: video });
+              }
+            },
+            width: canvasSize.width,
+            height: canvasSize.height,
+            facingMode: 'user',
+          });
+          await camera.start();
+          cameraRef.current = camera;
+          setIsLoading(false);
+        }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         setError('Не удалось получить доступ к камере: ' + message);
@@ -211,6 +262,15 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
 
     return () => {
       initRef.current = false;
+      processingRef.current = false;
+      if (animFrameRef.current !== null) {
+        cancelAnimationFrame(animFrameRef.current);
+        animFrameRef.current = null;
+      }
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((t) => t.stop());
+        streamRef.current = null;
+      }
       if (cameraRef.current) {
         cameraRef.current.stop();
       }
@@ -218,11 +278,18 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
         poseRef.current.close();
       }
     };
-  }, [canvasSize, onResults]);
+  }, [canvasSize, onResults, isMobile, startMobileCamera]);
 
   return (
     <div className="flex items-center justify-center w-full">
-      <div className="relative bg-gray-900 rounded-lg shadow-2xl overflow-hidden" style={{ width: `${canvasSize.width}px`, maxWidth: '100%', aspectRatio: `${canvasSize.width} / ${canvasSize.height}` }}>
+      <div
+        className="relative bg-gray-900 rounded-lg shadow-2xl overflow-hidden"
+        style={{
+          width: `${canvasSize.width}px`,
+          maxWidth: '100%',
+          aspectRatio: `${canvasSize.width} / ${canvasSize.height}`,
+        }}
+      >
         {isLoading && (
           <div className="absolute inset-0 flex items-center justify-center bg-gray-900 z-10">
             <p className="text-white text-lg">Загрузка камеры...</p>
@@ -239,12 +306,6 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
           playsInline
           muted
           autoPlay
-        />
-        <canvas
-          ref={cameraCanvasRef}
-          width={canvasSize.width}
-          height={canvasSize.height}
-          className="hidden"
         />
         <canvas
           ref={canvasRef}
