@@ -167,12 +167,13 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
 
     const stream = await navigator.mediaDevices.getUserMedia({
       video: {
-        facingMode: { ideal: 'environment' },
+        facingMode: { ideal: 'user' },  // ← FRONT CAMERA
         width: { ideal: canvasSize.width },
         height: { ideal: canvasSize.height },
       },
       audio: false,
     });
+
 
     streamRef.current = stream;
     video.srcObject = stream;
