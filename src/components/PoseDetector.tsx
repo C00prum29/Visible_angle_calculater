@@ -114,7 +114,15 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
       }
     }
 
-    if (results.poseLandmarks) {
+    // Scale landmarks to canvas size
+    const scaledLandmarks = results.poseLandmarks?.map((landmark: Landmark) => ({
+      ...landmark,
+      x: landmark.x * canvas.width,
+      y: landmark.y * canvas.height,
+      z: landmark.z * canvas.width,
+    })) || [];
+
+    if (results.poseLandmarks && scaledLandmarks.length > 0) {
       const landmarks = results.poseLandmarks as Landmark[];
       const limbLandmarks = getLimbLandmarks(landmarks, selectedLimbRef.current);
 
@@ -126,17 +134,27 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
         );
         onAngleUpdate(angle);
 
-        window.drawConnectors(ctx, results.poseLandmarks, window.POSE_CONNECTIONS, {
+        const scaledImmediately = (lm: Landmark) => ({
+          x: lm.x * canvas.width,
+          y: lm.y * canvas.height,
+          z: lm.z * canvas.width,
+        });
+
+        window.drawConnectors(ctx, scaledLandmarks, window.POSE_CONNECTIONS, {
           color: '#00FF00',
           lineWidth: 2,
         });
-        window.drawLandmarks(ctx, results.poseLandmarks, {
+        window.drawLandmarks(ctx, scaledLandmarks, {
           color: '#FF0000',
           lineWidth: 1,
           radius: 3,
         });
 
-        window.drawLandmarks(ctx, [limbLandmarks.point1, limbLandmarks.point2, limbLandmarks.point3], {
+        window.drawLandmarks(ctx, [
+          scaledImmediately(limbLandmarks.point1),
+          scaledImmediately(limbLandmarks.point2),
+          scaledImmediately(limbLandmarks.point3),
+        ], {
           color: '#FFD700',
           lineWidth: 2,
           radius: 6,
@@ -165,49 +183,71 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
     const canvas = canvasRef.current;
     if (!video || !canvas) return;
 
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: {
-        facingMode: { ideal: 'user' },  // ← FRONT CAMERA
-        width: { ideal: canvasSize.width },
-        height: { ideal: canvasSize.height },
-      },
-      audio: false,
-    });
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: 'user' },
+          width: { ideal: canvasSize.width },
+          height: { ideal: canvasSize.height },
+        },
+        audio: false,
+      });
 
+      streamRef.current = stream;
+      video.srcObject = stream;
 
-    streamRef.current = stream;
-    video.srcObject = stream;
+      await new Promise<void>((resolve, reject) => {
+        let resolved = false;
+        const timeout = setTimeout(() => {
+          if (!resolved) reject(new Error('Camera timeout'));
+        }, 10000);
 
-    await new Promise<void>((resolve, reject) => {
-      video.onloadedmetadata = () => {
-        video.play().then(resolve).catch(reject);
+        video.onloadedmetadata = () => {
+          resolved = true;
+          clearTimeout(timeout);
+          video.play().then(resolve).catch(reject);
+        };
+        video.onerror = () => {
+          if (!resolved) {
+            resolved = true;
+            clearTimeout(timeout);
+            reject(new Error('Video error'));
+          }
+        };
+      });
+
+      setIsLoading(false);
+      let frameCount = 0;
+      const frameLimit = 60;
+
+      const loop = () => {
+        frameCount++;
+
+        if (video.readyState >= 2) {
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          }
+
+          if (frameCount % frameLimit === 0 && !processingRef.current) {
+            processingRef.current = true;
+            pose.send({ image: video }).catch(() => {
+              processingRef.current = false;
+            });
+          }
+        }
+
+        if (streamRef.current) {
+          animFrameRef.current = requestAnimationFrame(loop);
+        }
       };
-      video.onerror = () => reject(new Error('Video error'));
-      setTimeout(() => reject(new Error('Camera timeout')), 10000);
-    });
 
-    setIsLoading(false);
-
-    const loop = async () => {
-      if (!processingRef.current && video.readyState >= 2 && video.videoWidth > 0) {
-        processingRef.current = true;
-
-        // Always show the live video frame on canvas so display is never black
-        const ctx = canvas.getContext('2d');
-        if (ctx) {
-          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        }
-
-        try {
-          await pose.send({ image: video });
-        } catch {
-          processingRef.current = false;
-        }
-      }
       animFrameRef.current = requestAnimationFrame(loop);
-    };
-
-    animFrameRef.current = requestAnimationFrame(loop);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setError('Не удалось подключить камеру: ' + message);
+      setIsLoading(false);
+    }
   }, [canvasSize]);
 
   useEffect(() => {
@@ -262,7 +302,6 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
     initPose();
 
     return () => {
-      initRef.current = false;
       processingRef.current = false;
       if (animFrameRef.current !== null) {
         cancelAnimationFrame(animFrameRef.current);
