@@ -51,11 +51,6 @@ function isMobileDevice(): boolean {
   return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
 }
 
-function isIOS(): boolean {
-  return /iPhone|iPad|iPod/i.test(navigator.userAgent) ||
-    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-}
-
 function getInitialCanvasSize() {
   const mobile = isMobileDevice();
   if (mobile) {
@@ -75,11 +70,11 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
   const cameraRef = useRef<ReturnType<typeof window.Camera> | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const animFrameRef = useRef<number | null>(null);
-  const processingRef = useRef(false);
   const selectedLimbRef = useRef<LimbType>(selectedLimb);
   const lastPoseResultRef = useRef<PoseResults | null>(null);
+  const sendingRef = useRef(false);
+  const mountedRef = useRef(true);
   const mobile = isMobileDevice();
-  const ios = isIOS();
   const [canvasSize, setCanvasSize] = useState(getInitialCanvasSize);
   const initRef = useRef(false);
 
@@ -160,7 +155,7 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
     ctx.stroke();
   }, [onAngleUpdate]);
 
-  // onResults for desktop: draws video + overlay in one pass (MediaPipe Camera sends every frame)
+  // Desktop: onResults draws video + overlay in one pass
   const onResultsDesktop = useCallback((results: PoseResults) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -184,14 +179,13 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
     ctx.restore();
   }, [drawPoseOverlay]);
 
-  // onResults for mobile/iOS: just store the result, drawing happens in rAF loop
+  // Mobile: onResults just stores the result, drawing happens in rAF loop
   const onResultsMobile = useCallback((results: PoseResults) => {
     lastPoseResultRef.current = results;
-    processingRef.current = false;
+    sendingRef.current = false;
   }, []);
 
-  // Mobile/iOS path: getUserMedia + rAF loop
-  // Video is drawn every frame, pose overlay is drawn on top from last available result
+  // Mobile path: getUserMedia + rAF loop with throttled pose.send
   const startMobileCamera = useCallback(async (pose: ReturnType<typeof window.Pose>) => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
@@ -208,6 +202,11 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
       };
 
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      if (!mountedRef.current) {
+        stream.getTracks().forEach(t => t.stop());
+        return;
+      }
+
       streamRef.current = stream;
       video.srcObject = stream;
 
@@ -234,9 +233,13 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
         };
       });
 
+      if (!mountedRef.current) return;
+
       setIsLoading(false);
 
       const loop = () => {
+        if (!mountedRef.current || !streamRef.current) return;
+
         if (video.readyState >= 2) {
           const ctx = canvas.getContext('2d');
           if (ctx) {
@@ -252,22 +255,21 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
             }
           }
 
-          // Send frame to MediaPipe if not already processing
-          if (!processingRef.current) {
-            processingRef.current = true;
+          // Send frame to MediaPipe only if previous send completed
+          if (!sendingRef.current) {
+            sendingRef.current = true;
             pose.send({ image: video }).catch(() => {
-              processingRef.current = false;
+              sendingRef.current = false;
             });
           }
         }
 
-        if (streamRef.current) {
-          animFrameRef.current = requestAnimationFrame(loop);
-        }
+        animFrameRef.current = requestAnimationFrame(loop);
       };
 
       animFrameRef.current = requestAnimationFrame(loop);
     } catch (err) {
+      if (!mountedRef.current) return;
       const message = err instanceof Error ? err.message : String(err);
       setError('Не удалось подключить камеру: ' + message);
       setIsLoading(false);
@@ -275,6 +277,8 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
   }, [canvasSize, drawPoseOverlay]);
 
   useEffect(() => {
+    mountedRef.current = true;
+
     if (!videoRef.current || !canvasRef.current) return;
     if (initRef.current) return;
     initRef.current = true;
@@ -295,14 +299,14 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
           staticImageMode: false,
         });
 
-        if (ios || mobile) {
+        if (mobile) {
           pose.onResults(onResultsMobile);
         } else {
           pose.onResults(onResultsDesktop);
         }
         poseRef.current = pose;
 
-        if (ios || mobile) {
+        if (mobile) {
           await startMobileCamera(pose);
         } else {
           const video = videoRef.current!;
@@ -321,6 +325,7 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
           setIsLoading(false);
         }
       } catch (err) {
+        if (!mountedRef.current) return;
         const message = err instanceof Error ? err.message : String(err);
         setError('Не удалось получить доступ к камере: ' + message);
         setIsLoading(false);
@@ -330,22 +335,41 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
     initPose();
 
     return () => {
+      mountedRef.current = false;
+
       if (animFrameRef.current !== null) {
         cancelAnimationFrame(animFrameRef.current);
         animFrameRef.current = null;
       }
+
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((t) => t.stop());
         streamRef.current = null;
       }
+
       if (cameraRef.current) {
-        cameraRef.current.stop();
+        try { cameraRef.current.stop(); } catch (_) { /* ignore */ }
+        cameraRef.current = null;
       }
+
       if (poseRef.current) {
-        poseRef.current.close();
+        try { poseRef.current.close(); } catch (_) { /* ignore */ }
+        poseRef.current = null;
       }
+
+      // Clear video element to release camera
+      if (videoRef.current) {
+        videoRef.current.onloadedmetadata = null;
+        videoRef.current.onerror = null;
+        videoRef.current.srcObject = null;
+        videoRef.current.load();
+      }
+
+      sendingRef.current = false;
+      lastPoseResultRef.current = null;
+      initRef.current = false;
     };
-  }, [canvasSize, onResultsDesktop, onResultsMobile, mobile, ios, startMobileCamera]);
+  }, [canvasSize, onResultsDesktop, onResultsMobile, mobile, startMobileCamera]);
 
   return (
     <div className="flex items-center justify-center w-full">
