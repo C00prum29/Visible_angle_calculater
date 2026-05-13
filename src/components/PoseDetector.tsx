@@ -68,9 +68,6 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
   const [error, setError] = useState<string>('');
   const poseRef = useRef<ReturnType<typeof window.Pose> | null>(null);
   const cameraRef = useRef<ReturnType<typeof window.Camera> | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const animFrameRef = useRef<number | null>(null);
-  const processingRef = useRef(false);
   const selectedLimbRef = useRef<LimbType>(selectedLimb);
   const isMobile = isMobileDevice();
   const [canvasSize, setCanvasSize] = useState(getInitialCanvasSize);
@@ -174,70 +171,7 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
     }
 
     ctx.restore();
-    processingRef.current = false;
   }, [onAngleUpdate]);
-
-  // Mobile path: getUserMedia directly + rAF loop to feed frames to MediaPipe
-  const startMobileCamera = useCallback(async (pose: ReturnType<typeof window.Pose>) => {
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    if (!video || !canvas) return;
-
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: { ideal: 'user' },
-          width: { ideal: canvasSize.width },
-          height: { ideal: canvasSize.height },
-        },
-        audio: false,
-      });
-
-      streamRef.current = stream;
-      video.srcObject = stream;
-
-      await new Promise<void>((resolve, reject) => {
-        let resolved = false;
-        const timeout = setTimeout(() => {
-          if (!resolved) reject(new Error('Camera timeout'));
-        }, 10000);
-
-        video.onloadedmetadata = () => {
-          resolved = true;
-          clearTimeout(timeout);
-          video.play().then(resolve).catch(reject);
-        };
-        video.onerror = () => {
-          if (!resolved) {
-            resolved = true;
-            clearTimeout(timeout);
-            reject(new Error('Video error'));
-          }
-        };
-      });
-
-      setIsLoading(false);
-
-      const loop = () => {
-        if (video.readyState >= 2 && !processingRef.current) {
-          processingRef.current = true;
-          pose.send({ image: video }).catch(() => {
-            processingRef.current = false;
-          });
-        }
-
-        if (streamRef.current) {
-          animFrameRef.current = requestAnimationFrame(loop);
-        }
-      };
-
-      animFrameRef.current = requestAnimationFrame(loop);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      setError('Не удалось подключить камеру: ' + message);
-      setIsLoading(false);
-    }
-  }, [canvasSize]);
 
   useEffect(() => {
     if (!videoRef.current || !canvasRef.current) return;
@@ -263,24 +197,20 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
         pose.onResults(onResults);
         poseRef.current = pose;
 
-        if (isMobile) {
-          await startMobileCamera(pose);
-        } else {
-          const video = videoRef.current!;
-          const camera = new window.Camera(video, {
-            onFrame: async () => {
-              if (poseRef.current && video.videoWidth > 0) {
-                await poseRef.current.send({ image: video });
-              }
-            },
-            width: canvasSize.width,
-            height: canvasSize.height,
-            facingMode: 'user',
-          });
-          await camera.start();
-          cameraRef.current = camera;
-          setIsLoading(false);
-        }
+        const video = videoRef.current!;
+        const camera = new window.Camera(video, {
+          onFrame: async () => {
+            if (poseRef.current && video.videoWidth > 0) {
+              await poseRef.current.send({ image: video });
+            }
+          },
+          width: canvasSize.width,
+          height: canvasSize.height,
+          facingMode: 'user',
+        });
+        await camera.start();
+        cameraRef.current = camera;
+        setIsLoading(false);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         setError('Не удалось получить доступ к камере: ' + message);
@@ -291,15 +221,6 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
     initPose();
 
     return () => {
-      processingRef.current = false;
-      if (animFrameRef.current !== null) {
-        cancelAnimationFrame(animFrameRef.current);
-        animFrameRef.current = null;
-      }
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((t) => t.stop());
-        streamRef.current = null;
-      }
       if (cameraRef.current) {
         cameraRef.current.stop();
       }
@@ -307,7 +228,7 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
         poseRef.current.close();
       }
     };
-  }, [canvasSize, onResults, isMobile, startMobileCamera]);
+  }, [canvasSize, onResults, isMobile]);
 
   return (
     <div className="flex items-center justify-center w-full">
