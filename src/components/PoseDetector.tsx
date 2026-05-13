@@ -217,13 +217,24 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
       });
 
       setIsLoading(false);
+      let frameCount = 0;
+      const frameLimit = 60;
 
       const loop = () => {
-        if (video.readyState >= 2 && !processingRef.current) {
-          processingRef.current = true;
-          pose.send({ image: video }).catch(() => {
-            processingRef.current = false;
-          });
+        frameCount++;
+
+        if (video.readyState >= 2) {
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          }
+
+          if (frameCount % frameLimit === 0 && !processingRef.current) {
+            processingRef.current = true;
+            pose.send({ image: video }).catch(() => {
+              processingRef.current = false;
+            });
+          }
         }
 
         if (streamRef.current) {
