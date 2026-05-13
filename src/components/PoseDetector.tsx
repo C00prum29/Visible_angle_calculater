@@ -16,7 +16,7 @@ declare global {
         onFrame: () => Promise<void>;
         width: number;
         height: number;
-        facingMode?: string;
+        facingMode?: 'user' | 'environment';
       }
     ) => {
       start: () => Promise<void>;
@@ -51,14 +51,9 @@ function isMobileDevice(): boolean {
   return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
 }
 
-function isIOS(): boolean {
-  return /iPhone|iPad|iPod/i.test(navigator.userAgent) ||
-    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-}
-
 function getInitialCanvasSize() {
-  const mobile = isMobileDevice();
-  if (mobile) {
+  const isMobile = isMobileDevice();
+  if (isMobile) {
     const width = Math.min(window.innerWidth - 32, 640);
     const height = Math.round((width * 3) / 4);
     return { width, height };
@@ -77,9 +72,7 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
   const animFrameRef = useRef<number | null>(null);
   const processingRef = useRef(false);
   const selectedLimbRef = useRef<LimbType>(selectedLimb);
-  const lastPoseResultRef = useRef<PoseResults | null>(null);
-  const mobile = isMobileDevice();
-  const ios = isIOS();
+  const isMobile = isMobileDevice();
   const [canvasSize, setCanvasSize] = useState(getInitialCanvasSize);
   const initRef = useRef(false);
 
@@ -88,7 +81,7 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
   }, [selectedLimb]);
 
   useEffect(() => {
-    if (!mobile) return;
+    if (!isMobile) return;
     const updateCanvasSize = () => {
       const width = Math.min(window.innerWidth - 32, 640);
       const height = Math.round((width * 3) / 4);
@@ -99,69 +92,9 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
     };
     window.addEventListener('resize', updateCanvasSize);
     return () => window.removeEventListener('resize', updateCanvasSize);
-  }, [mobile]);
+  }, [isMobile]);
 
-  const drawPoseOverlay = useCallback((ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, results: PoseResults) => {
-    if (!results.poseLandmarks) return;
-
-    const landmarks = results.poseLandmarks as Landmark[];
-    const limbLandmarks = getLimbLandmarks(landmarks, selectedLimbRef.current);
-    if (!limbLandmarks) return;
-
-    const angle = calculateAngle(
-      limbLandmarks.point1,
-      limbLandmarks.point2,
-      limbLandmarks.point3
-    );
-    onAngleUpdate(angle);
-
-    const scaledLandmarks = results.poseLandmarks.map((lm: Landmark) => ({
-      ...lm,
-      x: lm.x * canvas.width,
-      y: lm.y * canvas.height,
-      z: lm.z * canvas.width,
-    }));
-
-    const scaledPoint = (lm: Landmark) => ({
-      x: lm.x * canvas.width,
-      y: lm.y * canvas.height,
-      z: lm.z * canvas.width,
-    });
-
-    window.drawConnectors(ctx, scaledLandmarks, window.POSE_CONNECTIONS, {
-      color: '#00FF00',
-      lineWidth: 2,
-    });
-    window.drawLandmarks(ctx, scaledLandmarks, {
-      color: '#FF0000',
-      lineWidth: 1,
-      radius: 3,
-    });
-
-    window.drawLandmarks(ctx, [
-      scaledPoint(limbLandmarks.point1),
-      scaledPoint(limbLandmarks.point2),
-      scaledPoint(limbLandmarks.point3),
-    ], {
-      color: '#FFD700',
-      lineWidth: 2,
-      radius: 6,
-    });
-
-    const w = canvas.width;
-    const h = canvas.height;
-
-    ctx.strokeStyle = '#FFD700';
-    ctx.lineWidth = 4;
-    ctx.beginPath();
-    ctx.moveTo(limbLandmarks.point1.x * w, limbLandmarks.point1.y * h);
-    ctx.lineTo(limbLandmarks.point2.x * w, limbLandmarks.point2.y * h);
-    ctx.lineTo(limbLandmarks.point3.x * w, limbLandmarks.point3.y * h);
-    ctx.stroke();
-  }, [onAngleUpdate]);
-
-  // onResults for desktop: draws video + overlay in one pass (MediaPipe Camera sends every frame)
-  const onResultsDesktop = useCallback((results: PoseResults) => {
+  const onResults = useCallback((results: PoseResults) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
@@ -171,6 +104,7 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
     ctx.save();
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
+    // Draw the source image (video frame) passed back by MediaPipe
     if (results.image) {
       ctx.drawImage(results.image as CanvasImageSource, 0, 0, canvas.width, canvas.height);
     } else {
@@ -180,80 +114,122 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
       }
     }
 
-    drawPoseOverlay(ctx, canvas, results);
+    // Scale landmarks to canvas size
+    const scaledLandmarks = results.poseLandmarks?.map((landmark: Landmark) => ({
+      ...landmark,
+      x: landmark.x * canvas.width,
+      y: landmark.y * canvas.height,
+      z: landmark.z * canvas.width,
+    })) || [];
+
+    if (results.poseLandmarks && scaledLandmarks.length > 0) {
+      const landmarks = results.poseLandmarks as Landmark[];
+      const limbLandmarks = getLimbLandmarks(landmarks, selectedLimbRef.current);
+
+      if (limbLandmarks) {
+        const angle = calculateAngle(
+          limbLandmarks.point1,
+          limbLandmarks.point2,
+          limbLandmarks.point3
+        );
+        onAngleUpdate(angle);
+
+        const scaledImmediately = (lm: Landmark) => ({
+          x: lm.x * canvas.width,
+          y: lm.y * canvas.height,
+          z: lm.z * canvas.width,
+        });
+
+        window.drawConnectors(ctx, scaledLandmarks, window.POSE_CONNECTIONS, {
+          color: '#00FF00',
+          lineWidth: 2,
+        });
+        window.drawLandmarks(ctx, scaledLandmarks, {
+          color: '#FF0000',
+          lineWidth: 1,
+          radius: 3,
+        });
+
+        window.drawLandmarks(ctx, [
+          scaledImmediately(limbLandmarks.point1),
+          scaledImmediately(limbLandmarks.point2),
+          scaledImmediately(limbLandmarks.point3),
+        ], {
+          color: '#FFD700',
+          lineWidth: 2,
+          radius: 6,
+        });
+
+        const w = canvas.width;
+        const h = canvas.height;
+
+        ctx.strokeStyle = '#FFD700';
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(limbLandmarks.point1.x * w, limbLandmarks.point1.y * h);
+        ctx.lineTo(limbLandmarks.point2.x * w, limbLandmarks.point2.y * h);
+        ctx.lineTo(limbLandmarks.point3.x * w, limbLandmarks.point3.y * h);
+        ctx.stroke();
+      }
+    }
+
     ctx.restore();
-  }, [drawPoseOverlay]);
-
-  // onResults for mobile/iOS: just store the result, drawing happens in rAF loop
-  const onResultsMobile = useCallback((results: PoseResults) => {
-    lastPoseResultRef.current = results;
     processingRef.current = false;
-  }, []);
+  }, [onAngleUpdate]);
 
-  // Mobile/iOS path: getUserMedia + rAF loop
-  // Video is drawn every frame, pose overlay is drawn on top from last available result
+  // Mobile path: getUserMedia directly + rAF loop to feed frames to MediaPipe
   const startMobileCamera = useCallback(async (pose: ReturnType<typeof window.Pose>) => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
     if (!video || !canvas) return;
 
     try {
-      const constraints: MediaStreamConstraints = {
+      const stream = await navigator.mediaDevices.getUserMedia({
         video: {
-          facingMode: 'user',
+          facingMode: { ideal: 'user' },
           width: { ideal: canvasSize.width },
           height: { ideal: canvasSize.height },
         },
         audio: false,
-      };
+      });
 
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
       streamRef.current = stream;
       video.srcObject = stream;
 
       await new Promise<void>((resolve, reject) => {
-        let settled = false;
+        let resolved = false;
         const timeout = setTimeout(() => {
-          if (!settled) {
-            settled = true;
-            reject(new Error('Camera timeout'));
-          }
-        }, 15000);
+          if (!resolved) reject(new Error('Camera timeout'));
+        }, 10000);
 
         video.onloadedmetadata = () => {
-          if (settled) return;
-          settled = true;
+          resolved = true;
           clearTimeout(timeout);
           video.play().then(resolve).catch(reject);
         };
         video.onerror = () => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timeout);
-          reject(new Error('Video error'));
+          if (!resolved) {
+            resolved = true;
+            clearTimeout(timeout);
+            reject(new Error('Video error'));
+          }
         };
       });
 
       setIsLoading(false);
+      let frameCount = 0;
+      const frameLimit = 60;
 
       const loop = () => {
+        frameCount++;
+
         if (video.readyState >= 2) {
           const ctx = canvas.getContext('2d');
           if (ctx) {
-            // Draw video every frame
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-            // Draw pose overlay from last available result
-            const lastResult = lastPoseResultRef.current;
-            if (lastResult) {
-              ctx.save();
-              drawPoseOverlay(ctx, canvas, lastResult);
-              ctx.restore();
-            }
           }
 
-          // Send frame to MediaPipe if not already processing
-          if (!processingRef.current) {
+          if (frameCount % frameLimit === 0 && !processingRef.current) {
             processingRef.current = true;
             pose.send({ image: video }).catch(() => {
               processingRef.current = false;
@@ -272,7 +248,7 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
       setError('Не удалось подключить камеру: ' + message);
       setIsLoading(false);
     }
-  }, [canvasSize, drawPoseOverlay]);
+  }, [canvasSize]);
 
   useEffect(() => {
     if (!videoRef.current || !canvasRef.current) return;
@@ -286,7 +262,7 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
         });
 
         pose.setOptions({
-          modelComplexity: mobile ? 0 : 1,
+          modelComplexity: isMobile ? 0 : 1,
           smoothLandmarks: true,
           enableSegmentation: false,
           smoothSegmentation: false,
@@ -295,14 +271,10 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
           staticImageMode: false,
         });
 
-        if (ios || mobile) {
-          pose.onResults(onResultsMobile);
-        } else {
-          pose.onResults(onResultsDesktop);
-        }
+        pose.onResults(onResults);
         poseRef.current = pose;
 
-        if (ios || mobile) {
+        if (isMobile) {
           await startMobileCamera(pose);
         } else {
           const video = videoRef.current!;
@@ -330,6 +302,7 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
     initPose();
 
     return () => {
+      processingRef.current = false;
       if (animFrameRef.current !== null) {
         cancelAnimationFrame(animFrameRef.current);
         animFrameRef.current = null;
@@ -345,7 +318,7 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
         poseRef.current.close();
       }
     };
-  }, [canvasSize, onResultsDesktop, onResultsMobile, mobile, ios, startMobileCamera]);
+  }, [canvasSize, onResults, isMobile, startMobileCamera]);
 
   return (
     <div className="flex items-center justify-center w-full">
