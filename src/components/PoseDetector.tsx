@@ -1,46 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { LimbType, Landmark } from '../types';
 import { calculateAngle, getLimbLandmarks } from '../utils/angleCalculator';
-
-declare global {
-  interface Window {
-    Pose: new (config: { locateFile: (file: string) => string }) => {
-      setOptions: (options: Record<string, unknown>) => void;
-      onResults: (callback: (results: PoseResults) => void) => void;
-      send: (input: { image: HTMLVideoElement | HTMLCanvasElement }) => Promise<void>;
-      close: () => void;
-    };
-    Camera: new (
-      videoElement: HTMLVideoElement,
-      config: {
-        onFrame: () => Promise<void>;
-        width: number;
-        height: number;
-        facingMode?: string;
-      }
-    ) => {
-      start: () => Promise<void>;
-      stop: () => void;
-    };
-    drawConnectors: (
-      ctx: CanvasRenderingContext2D,
-      landmarks: Landmark[],
-      connections: [number, number][],
-      style: { color: string; lineWidth: number }
-    ) => void;
-    drawLandmarks: (
-      ctx: CanvasRenderingContext2D,
-      landmarks: Landmark[],
-      style: { color: string; lineWidth: number; radius: number }
-    ) => void;
-    POSE_CONNECTIONS: [number, number][];
-  }
-}
-
-interface PoseResults {
-  image: HTMLVideoElement | HTMLCanvasElement | HTMLImageElement;
-  poseLandmarks?: Landmark[];
-}
+import { PoseLandmarker, FilesetResolver, DrawingUtils, NormalizedLandmark } from '@mediapipe/tasks-vision';
 
 interface PoseDetectorProps {
   selectedLimb: LimbType;
@@ -66,36 +27,25 @@ function getInitialCanvasSize() {
   return { width: 640, height: 480 };
 }
 
-// FIX 1: Increased interval for iOS — MediaPipe on iOS needs more time between sends.
-// 200ms was too aggressive; 350ms gives the WASM runtime breathing room.
-const MOBILE_POSE_INTERVAL_MS = 350;
-
-// FIX 2: Reduced send timeout — 3000ms was too long; if pose.send() hangs on iOS,
-// 1500ms is enough to detect the stall and reset the processing flag.
-const SEND_TIMEOUT_MS = 1500;
+const POSE_INTERVAL_MS = isIOS() ? 100 : isMobileDevice() ? 80 : 0;
 
 export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string>('');
-  const poseRef = useRef<ReturnType<typeof window.Pose> | null>(null);
-  const cameraRef = useRef<ReturnType<typeof window.Camera> | null>(null);
+  const poseLandmarkerRef = useRef<PoseLandmarker | null>(null);
+  const drawingUtilsRef = useRef<DrawingUtils | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const animFrameRef = useRef<number | null>(null);
-  const processingRef = useRef(false);
   const lastSendTimeRef = useRef(0);
-  const sendTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const selectedLimbRef = useRef<LimbType>(selectedLimb);
   const onAngleUpdateRef = useRef(onAngleUpdate);
-  const lastPoseResultRef = useRef<PoseResults | null>(null);
   const activeRef = useRef(true);
   const mobile = isMobileDevice();
   const ios = isIOS();
   const [canvasSize, setCanvasSize] = useState(getInitialCanvasSize);
   const initRef = useRef(false);
-  // FIX 3: Track canvas size in a ref so startMobileCamera doesn't need
-  // canvasSize as a dep (preventing useCallback recreation on resize).
   const canvasSizeRef = useRef(canvasSize);
 
   useEffect(() => {
@@ -124,12 +74,9 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
     return () => window.removeEventListener('resize', updateCanvasSize);
   }, [mobile]);
 
-  // FIX 4: drawPoseOverlay now draws limb lines manually instead of relying on
-  // window.drawConnectors/window.drawLandmarks for the highlighted points.
-  // On iOS, those MediaPipe drawing utils sometimes fail silently when called
-  // from a rAF loop that's separate from the pose.send() callback.
-  const drawPoseOverlay = useCallback((ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, landmarks: Landmark[]) => {
-    const limbLandmarks = getLimbLandmarks(landmarks, selectedLimbRef.current);
+  const drawPoseOverlay = useCallback((ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, landmarks: NormalizedLandmark[]) => {
+    const castLandmarks = landmarks as Landmark[];
+    const limbLandmarks = getLimbLandmarks(castLandmarks, selectedLimbRef.current);
     if (!limbLandmarks) return;
 
     const angle = calculateAngle(
@@ -142,35 +89,20 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
     const w = canvas.width;
     const h = canvas.height;
 
-    const scaledLandmarks = landmarks.map((lm: Landmark) => ({
-      ...lm,
-      x: lm.x * w,
-      y: lm.y * h,
-      z: lm.z * w,
-    }));
-
-    // FIX 5: Wrap MediaPipe drawing helpers in try/catch.
-    // On iOS they can throw if the CDN scripts haven't fully initialised yet.
+    // Draw all skeleton connections using DrawingUtils
     try {
-      if (typeof window.drawConnectors === 'function' && window.POSE_CONNECTIONS) {
-        window.drawConnectors(ctx, scaledLandmarks, window.POSE_CONNECTIONS, {
+      if (drawingUtilsRef.current) {
+        drawingUtilsRef.current.drawLandmarks(landmarks, {
+          radius: 2,
           color: '#00FF00',
-          lineWidth: 2,
-        });
-      }
-      if (typeof window.drawLandmarks === 'function') {
-        window.drawLandmarks(ctx, scaledLandmarks, {
-          color: '#FF0000',
-          lineWidth: 1,
-          radius: 3,
+          fillColor: '#FF0000',
         });
       }
     } catch (_e) {
-      // Drawing helpers unavailable — fall through to manual drawing below
+      // DrawingUtils unavailable, fall through to manual drawing
     }
 
-    // Manual fallback drawing for the three key limb points (always runs,
-    // gives visible feedback even when MediaPipe drawing utils fail).
+    // Manual drawing for the three key limb points (always runs as primary visualization)
     const pt1 = { x: limbLandmarks.point1.x * w, y: limbLandmarks.point1.y * h };
     const pt2 = { x: limbLandmarks.point2.x * w, y: limbLandmarks.point2.y * h };
     const pt3 = { x: limbLandmarks.point3.x * w, y: limbLandmarks.point3.y * h };
@@ -202,46 +134,7 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
     ctx.fillText(label, pt2.x + 12, pt2.y - 12);
   }, []);
 
-  // Desktop: MediaPipe Camera drives the loop
-  const onResultsDesktop = useCallback((results: PoseResults) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    ctx.save();
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    if (results.image) {
-      ctx.drawImage(results.image as CanvasImageSource, 0, 0, canvas.width, canvas.height);
-    } else {
-      const video = videoRef.current;
-      if (video && video.readyState >= 2) {
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      }
-    }
-
-    if (results.poseLandmarks) {
-      drawPoseOverlay(ctx, canvas, results.poseLandmarks as Landmark[]);
-    }
-    ctx.restore();
-  }, [drawPoseOverlay]);
-
-  // Mobile/iOS: store latest pose result; rAF loop applies it
-  const onResultsMobile = useCallback((results: PoseResults) => {
-    if (results.poseLandmarks && results.poseLandmarks.length > 0) {
-      lastPoseResultRef.current = results;
-    }
-    processingRef.current = false;
-    if (sendTimeoutRef.current !== null) {
-      clearTimeout(sendTimeoutRef.current);
-      sendTimeoutRef.current = null;
-    }
-  }, []);
-
-  // FIX 6: startMobileCamera no longer depends on `canvasSize` (uses ref instead),
-  // so the function reference is stable and won't retrigger the main useEffect.
-  const startMobileCamera = useCallback(async (pose: ReturnType<typeof window.Pose>) => {
+  const startCamera = useCallback(async (poseLandmarker: PoseLandmarker) => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
     if (!video || !canvas) return;
@@ -252,12 +145,13 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
       const constraints: MediaStreamConstraints = {
         video: {
           facingMode: 'user',
-          width: { ideal: width, max: width },
-          height: { ideal: height, max: height },
-          // FIX 7: Reduced max frameRate on iOS — high frame rates cause the
-          // GPU/CPU to throttle, which stalls the WKWebView JS thread and
-          // triggers the freeze. 15fps is stable.
-          frameRate: { ideal: 10, max: 15 },
+          width: { ideal: width, max: ios ? width : 1280 },
+          height: { ideal: height, max: ios ? height : 960 },
+          frameRate: ios
+            ? { ideal: 15, max: 30 }
+            : mobile
+              ? { ideal: 24, max: 30 }
+              : { ideal: 30, max: 60 },
         },
         audio: false,
       };
@@ -276,8 +170,6 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
           if (settled) return;
           settled = true;
           clearTimeout(timeout);
-          // FIX 8: On iOS, play() must be called from a user gesture context or
-          // it silently fails. Using .catch() here surfaces errors.
           video.play().then(resolve).catch((err) => {
             reject(new Error('Video play failed: ' + err.message));
           });
@@ -298,46 +190,40 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
         if (video.readyState >= 2) {
           const ctx = canvas.getContext('2d');
           if (ctx) {
+            // Mirror the video for front-facing camera
+            ctx.save();
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.translate(canvas.width, 0);
+            ctx.scale(-1, 1);
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            ctx.restore();
 
-            const lastResult = lastPoseResultRef.current;
-            if (lastResult?.poseLandmarks && lastResult.poseLandmarks.length > 0) {
-              ctx.save();
-              drawPoseOverlay(ctx, canvas, lastResult.poseLandmarks as Landmark[]);
-              ctx.restore();
-            }
-          }
+            const now = performance.now();
+            const shouldSend = POSE_INTERVAL_MS === 0 || now - lastSendTimeRef.current >= POSE_INTERVAL_MS;
 
-          const now = performance.now();
-          if (!processingRef.current && now - lastSendTimeRef.current >= MOBILE_POSE_INTERVAL_MS) {
-            processingRef.current = true;
-            lastSendTimeRef.current = now;
+            if (shouldSend && poseLandmarker) {
+              lastSendTimeRef.current = now;
 
-            // FIX 9: SEND_TIMEOUT_MS is now 1500ms (was 3000ms).
-            // On iOS, if pose.send() stalls (JS thread suspended by browser),
-            // the old 3s timeout meant the UI would freeze for 3 full seconds
-            // before recovering — now it recovers in 1.5s.
-            sendTimeoutRef.current = setTimeout(() => {
-              processingRef.current = false;
-              sendTimeoutRef.current = null;
-            }, SEND_TIMEOUT_MS);
+              try {
+                const result = poseLandmarker.detect(video);
 
-            // FIX 10: Wrap pose.send in try/catch AND handle the promise rejection.
-            // On iOS, pose.send() can throw synchronously if the WASM runtime
-            // is not ready, which would leave processingRef stuck at true.
-            try {
-              pose.send({ image: video }).catch(() => {
-                processingRef.current = false;
-                if (sendTimeoutRef.current !== null) {
-                  clearTimeout(sendTimeoutRef.current);
-                  sendTimeoutRef.current = null;
+                if (result.landmarks && result.landmarks.length > 0) {
+                  const landmarks = result.landmarks[0];
+
+                  // Mirror the x coordinates to match the mirrored video
+                  const mirroredLandmarks: NormalizedLandmark[] = landmarks.map((lm) => ({
+                    x: 1 - lm.x,
+                    y: lm.y,
+                    z: lm.z,
+                    visibility: lm.visibility ?? 0,
+                  }));
+
+                  ctx.save();
+                  drawPoseOverlay(ctx, canvas, mirroredLandmarks);
+                  ctx.restore();
                 }
-              });
-            } catch {
-              processingRef.current = false;
-              if (sendTimeoutRef.current !== null) {
-                clearTimeout(sendTimeoutRef.current);
-                sendTimeoutRef.current = null;
+              } catch (_e) {
+                // pose detection failed for this frame, continue
               }
             }
           }
@@ -352,7 +238,7 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
       setError('Не удалось подключить камеру: ' + message);
       setIsLoading(false);
     }
-  }, [drawPoseOverlay]); // FIX 6: removed canvasSize from deps
+  }, [drawPoseOverlay, ios, mobile]);
 
   useEffect(() => {
     if (!videoRef.current || !canvasRef.current) return;
@@ -362,45 +248,34 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
 
     const initPose = async () => {
       try {
-        const pose = new window.Pose({
-          locateFile: (file: string) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`,
-        });
+        const vision = await FilesetResolver.forVisionTasks(
+          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm'
+        );
 
-        pose.setOptions({
-          modelComplexity: 0,
-          smoothLandmarks: true,
-          enableSegmentation: false,
-          smoothSegmentation: false,
-          minDetectionConfidence: 0.5,
+        const poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
+          baseOptions: {
+            modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task',
+            delegate: 'GPU',
+          },
+          runningMode: 'VIDEO',
+          numPoses: 1,
+          minPoseDetectionConfidence: 0.5,
+          minPosePresenceConfidence: 0.5,
           minTrackingConfidence: 0.5,
-          staticImageMode: false,
         });
 
-        if (ios || mobile) {
-          pose.onResults(onResultsMobile);
-          poseRef.current = pose;
-          await startMobileCamera(pose);
-        } else {
-          pose.onResults(onResultsDesktop);
-          poseRef.current = pose;
-          const video = videoRef.current!;
-          const camera = new window.Camera(video, {
-            onFrame: async () => {
-              if (poseRef.current && video.videoWidth > 0) {
-                await poseRef.current.send({ image: video });
-              }
-            },
-            width: canvasSize.width,
-            height: canvasSize.height,
-            facingMode: 'user',
-          });
-          await camera.start();
-          cameraRef.current = camera;
-          setIsLoading(false);
+        poseLandmarkerRef.current = poseLandmarker;
+
+        const canvas = canvasRef.current!;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          drawingUtilsRef.current = new DrawingUtils(ctx);
         }
+
+        await startCamera(poseLandmarker);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        setError('Не удалось получить доступ к камере: ' + message);
+        setError('Не удалось инициализировать распознавание: ' + message);
         setIsLoading(false);
       }
     };
@@ -415,25 +290,16 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
         cancelAnimationFrame(animFrameRef.current);
         animFrameRef.current = null;
       }
-      if (sendTimeoutRef.current !== null) {
-        clearTimeout(sendTimeoutRef.current);
-        sendTimeoutRef.current = null;
-      }
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((t) => t.stop());
         streamRef.current = null;
       }
-      if (cameraRef.current) {
-        cameraRef.current.stop();
-        cameraRef.current = null;
+      if (poseLandmarkerRef.current) {
+        poseLandmarkerRef.current.close();
+        poseLandmarkerRef.current = null;
       }
-      if (poseRef.current) {
-        poseRef.current.close();
-        poseRef.current = null;
-      }
+      drawingUtilsRef.current = null;
     };
-    // FIX 11: Stable dependency list — startMobileCamera is now stable (see FIX 6),
-    // so this effect only runs once on mount and cleans up on unmount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
