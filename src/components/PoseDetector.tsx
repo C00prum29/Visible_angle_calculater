@@ -59,12 +59,16 @@ function isIOS(): boolean {
 function getInitialCanvasSize() {
   const mobile = isMobileDevice();
   if (mobile) {
-    const width = Math.min(window.innerWidth - 32, 640);
+    // Use smaller resolution on mobile to reduce GPU load
+    const width = Math.min(window.innerWidth - 32, 480);
     const height = Math.round((width * 3) / 4);
     return { width, height };
   }
   return { width: 640, height: 480 };
 }
+
+// Interval in ms between pose.send() calls on iOS/mobile to avoid GPU stall
+const MOBILE_POSE_INTERVAL_MS = 200; // ~5fps for pose inference, video still renders at 60fps
 
 export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -76,8 +80,11 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
   const streamRef = useRef<MediaStream | null>(null);
   const animFrameRef = useRef<number | null>(null);
   const processingRef = useRef(false);
+  const lastSendTimeRef = useRef(0);
+  const sendTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const selectedLimbRef = useRef<LimbType>(selectedLimb);
   const lastPoseResultRef = useRef<PoseResults | null>(null);
+  const activeRef = useRef(true);
   const mobile = isMobileDevice();
   const ios = isIOS();
   const [canvasSize, setCanvasSize] = useState(getInitialCanvasSize);
@@ -90,7 +97,7 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
   useEffect(() => {
     if (!mobile) return;
     const updateCanvasSize = () => {
-      const width = Math.min(window.innerWidth - 32, 640);
+      const width = Math.min(window.innerWidth - 32, 480);
       const height = Math.round((width * 3) / 4);
       setCanvasSize((prev) => {
         if (prev.width === width && prev.height === height) return prev;
@@ -101,10 +108,7 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
     return () => window.removeEventListener('resize', updateCanvasSize);
   }, [mobile]);
 
-  const drawPoseOverlay = useCallback((ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, results: PoseResults) => {
-    if (!results.poseLandmarks) return;
-
-    const landmarks = results.poseLandmarks as Landmark[];
+  const drawPoseOverlay = useCallback((ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, landmarks: Landmark[]) => {
     const limbLandmarks = getLimbLandmarks(landmarks, selectedLimbRef.current);
     if (!limbLandmarks) return;
 
@@ -115,7 +119,7 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
     );
     onAngleUpdate(angle);
 
-    const scaledLandmarks = results.poseLandmarks.map((lm: Landmark) => ({
+    const scaledLandmarks = landmarks.map((lm: Landmark) => ({
       ...lm,
       x: lm.x * canvas.width,
       y: lm.y * canvas.height,
@@ -160,7 +164,7 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
     ctx.stroke();
   }, [onAngleUpdate]);
 
-  // onResults for desktop: draws video + overlay in one pass (MediaPipe Camera sends every frame)
+  // Desktop: MediaPipe Camera drives the loop, results include video frame
   const onResultsDesktop = useCallback((results: PoseResults) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -180,29 +184,38 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
       }
     }
 
-    drawPoseOverlay(ctx, canvas, results);
+    if (results.poseLandmarks) {
+      drawPoseOverlay(ctx, canvas, results.poseLandmarks as Landmark[]);
+    }
     ctx.restore();
   }, [drawPoseOverlay]);
 
-  // onResults for mobile/iOS: just store the result, drawing happens in rAF loop
+  // Mobile/iOS: store latest pose result; rAF loop draws video + overlay separately
   const onResultsMobile = useCallback((results: PoseResults) => {
-    lastPoseResultRef.current = results;
+    if (results.poseLandmarks) {
+      lastPoseResultRef.current = results;
+    }
+    // Clear the processing lock and the safety timeout
     processingRef.current = false;
+    if (sendTimeoutRef.current !== null) {
+      clearTimeout(sendTimeoutRef.current);
+      sendTimeoutRef.current = null;
+    }
   }, []);
 
-  // Mobile/iOS path: getUserMedia + rAF loop
-  // Video is drawn every frame, pose overlay is drawn on top from last available result
   const startMobileCamera = useCallback(async (pose: ReturnType<typeof window.Pose>) => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
     if (!video || !canvas) return;
 
     try {
+      // Request a lower resolution to reduce memory pressure on iOS
       const constraints: MediaStreamConstraints = {
         video: {
           facingMode: 'user',
-          width: { ideal: canvasSize.width },
-          height: { ideal: canvasSize.height },
+          width: { ideal: canvasSize.width, max: canvasSize.width },
+          height: { ideal: canvasSize.height, max: canvasSize.height },
+          frameRate: { ideal: 15, max: 30 },
         },
         audio: false,
       };
@@ -214,10 +227,7 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
       await new Promise<void>((resolve, reject) => {
         let settled = false;
         const timeout = setTimeout(() => {
-          if (!settled) {
-            settled = true;
-            reject(new Error('Camera timeout'));
-          }
+          if (!settled) { settled = true; reject(new Error('Camera timeout')); }
         }, 15000);
 
         video.onloadedmetadata = () => {
@@ -237,33 +247,44 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
       setIsLoading(false);
 
       const loop = () => {
+        if (!activeRef.current) return;
+
         if (video.readyState >= 2) {
           const ctx = canvas.getContext('2d');
           if (ctx) {
-            // Draw video every frame
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-            // Draw pose overlay from last available result
             const lastResult = lastPoseResultRef.current;
-            if (lastResult) {
+            if (lastResult?.poseLandmarks) {
               ctx.save();
-              drawPoseOverlay(ctx, canvas, lastResult);
+              drawPoseOverlay(ctx, canvas, lastResult.poseLandmarks as Landmark[]);
               ctx.restore();
             }
           }
 
-          // Send frame to MediaPipe if not already processing
-          if (!processingRef.current) {
+          // Throttle pose inference to avoid blocking the iOS GPU
+          const now = performance.now();
+          if (!processingRef.current && now - lastSendTimeRef.current >= MOBILE_POSE_INTERVAL_MS) {
             processingRef.current = true;
+            lastSendTimeRef.current = now;
+
+            // Safety timeout: if pose.send() never resolves, unblock after 3s
+            sendTimeoutRef.current = setTimeout(() => {
+              processingRef.current = false;
+              sendTimeoutRef.current = null;
+            }, 3000);
+
             pose.send({ image: video }).catch(() => {
               processingRef.current = false;
+              if (sendTimeoutRef.current !== null) {
+                clearTimeout(sendTimeoutRef.current);
+                sendTimeoutRef.current = null;
+              }
             });
           }
         }
 
-        if (streamRef.current) {
-          animFrameRef.current = requestAnimationFrame(loop);
-        }
+        animFrameRef.current = requestAnimationFrame(loop);
       };
 
       animFrameRef.current = requestAnimationFrame(loop);
@@ -278,6 +299,7 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
     if (!videoRef.current || !canvasRef.current) return;
     if (initRef.current) return;
     initRef.current = true;
+    activeRef.current = true;
 
     const initPose = async () => {
       try {
@@ -286,25 +308,22 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
         });
 
         pose.setOptions({
-          modelComplexity: mobile ? 0 : 1,
+          modelComplexity: 0, // Always use lite model — even on desktop it's fast enough
           smoothLandmarks: true,
           enableSegmentation: false,
           smoothSegmentation: false,
-          minDetectionConfidence: 0.4,
-          minTrackingConfidence: 0.4,
+          minDetectionConfidence: 0.5,
+          minTrackingConfidence: 0.5,
           staticImageMode: false,
         });
 
         if (ios || mobile) {
           pose.onResults(onResultsMobile);
-        } else {
-          pose.onResults(onResultsDesktop);
-        }
-        poseRef.current = pose;
-
-        if (ios || mobile) {
+          poseRef.current = pose;
           await startMobileCamera(pose);
         } else {
+          pose.onResults(onResultsDesktop);
+          poseRef.current = pose;
           const video = videoRef.current!;
           const camera = new window.Camera(video, {
             onFrame: async () => {
@@ -330,9 +349,16 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
     initPose();
 
     return () => {
+      activeRef.current = false;
+      initRef.current = false;
+
       if (animFrameRef.current !== null) {
         cancelAnimationFrame(animFrameRef.current);
         animFrameRef.current = null;
+      }
+      if (sendTimeoutRef.current !== null) {
+        clearTimeout(sendTimeoutRef.current);
+        sendTimeoutRef.current = null;
       }
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((t) => t.stop());
@@ -340,9 +366,11 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
       }
       if (cameraRef.current) {
         cameraRef.current.stop();
+        cameraRef.current = null;
       }
       if (poseRef.current) {
         poseRef.current.close();
+        poseRef.current = null;
       }
     };
   }, [canvasSize, onResultsDesktop, onResultsMobile, mobile, ios, startMobileCamera]);
