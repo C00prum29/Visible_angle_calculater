@@ -1,7 +1,46 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { LimbType, Landmark } from '../types';
 import { calculateAngle, getLimbLandmarks } from '../utils/angleCalculator';
-import { PoseLandmarker, FilesetResolver, DrawingUtils, NormalizedLandmark } from '@mediapipe/tasks-vision';
+
+declare global {
+  interface Window {
+    Pose: new (config: { locateFile: (file: string) => string }) => {
+      setOptions: (options: Record<string, unknown>) => void;
+      onResults: (callback: (results: PoseResults) => void) => void;
+      send: (input: { image: HTMLVideoElement | HTMLCanvasElement }) => Promise<void>;
+      close: () => void;
+    };
+    Camera: new (
+      videoElement: HTMLVideoElement,
+      config: {
+        onFrame: () => Promise<void>;
+        width: number;
+        height: number;
+        facingMode?: string;
+      }
+    ) => {
+      start: () => Promise<void>;
+      stop: () => void;
+    };
+    drawConnectors: (
+      ctx: CanvasRenderingContext2D,
+      landmarks: Landmark[],
+      connections: [number, number][],
+      style: { color: string; lineWidth: number }
+    ) => void;
+    drawLandmarks: (
+      ctx: CanvasRenderingContext2D,
+      landmarks: Landmark[],
+      style: { color: string; lineWidth: number; radius: number }
+    ) => void;
+    POSE_CONNECTIONS: [number, number][];
+  }
+}
+
+interface PoseResults {
+  image: HTMLVideoElement | HTMLCanvasElement | HTMLImageElement;
+  poseLandmarks?: Landmark[];
+}
 
 interface PoseDetectorProps {
   selectedLimb: LimbType;
@@ -27,31 +66,30 @@ function getInitialCanvasSize() {
   return { width: 640, height: 480 };
 }
 
-const POSE_INTERVAL_MS = isIOS() ? 100 : isMobileDevice() ? 80 : 0;
+const MOBILE_POSE_INTERVAL_MS = 200;
 
 export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string>('');
-  const poseLandmarkerRef = useRef<PoseLandmarker | null>(null);
-  const drawingUtilsRef = useRef<DrawingUtils | null>(null);
+  const poseRef = useRef<ReturnType<typeof window.Pose> | null>(null);
+  const cameraRef = useRef<ReturnType<typeof window.Camera> | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const animFrameRef = useRef<number | null>(null);
+  const processingRef = useRef(false);
   const lastSendTimeRef = useRef(0);
+  const sendTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const selectedLimbRef = useRef<LimbType>(selectedLimb);
   const onAngleUpdateRef = useRef(onAngleUpdate);
+  const lastPoseResultRef = useRef<PoseResults | null>(null);
   const activeRef = useRef(true);
   const mobile = isMobileDevice();
   const ios = isIOS();
   const [canvasSize, setCanvasSize] = useState(getInitialCanvasSize);
   const initRef = useRef(false);
-  const canvasSizeRef = useRef(canvasSize);
 
-  useEffect(() => {
-    canvasSizeRef.current = canvasSize;
-  }, [canvasSize]);
-
+  // Keep refs in sync with props — never cause re-renders or effect restarts
   useEffect(() => {
     selectedLimbRef.current = selectedLimb;
   }, [selectedLimb]);
@@ -74,9 +112,9 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
     return () => window.removeEventListener('resize', updateCanvasSize);
   }, [mobile]);
 
-  const drawPoseOverlay = useCallback((ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, landmarks: NormalizedLandmark[]) => {
-    const castLandmarks = landmarks as Landmark[];
-    const limbLandmarks = getLimbLandmarks(castLandmarks, selectedLimbRef.current);
+  // Pure canvas drawing — no React state updates, uses refs only
+  const drawPoseOverlay = useCallback((ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, landmarks: Landmark[]) => {
+    const limbLandmarks = getLimbLandmarks(landmarks, selectedLimbRef.current);
     if (!limbLandmarks) return;
 
     const angle = calculateAngle(
@@ -84,74 +122,104 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
       limbLandmarks.point2,
       limbLandmarks.point3
     );
+    // Use ref to avoid re-render cascade
     onAngleUpdateRef.current(angle);
+
+    const scaledLandmarks = landmarks.map((lm: Landmark) => ({
+      ...lm,
+      x: lm.x * canvas.width,
+      y: lm.y * canvas.height,
+      z: lm.z * canvas.width,
+    }));
+
+    const scaledPoint = (lm: Landmark) => ({
+      x: lm.x * canvas.width,
+      y: lm.y * canvas.height,
+      z: lm.z * canvas.width,
+    });
+
+    window.drawConnectors(ctx, scaledLandmarks, window.POSE_CONNECTIONS, {
+      color: '#00FF00',
+      lineWidth: 2,
+    });
+    window.drawLandmarks(ctx, scaledLandmarks, {
+      color: '#FF0000',
+      lineWidth: 1,
+      radius: 3,
+    });
+
+    window.drawLandmarks(ctx, [
+      scaledPoint(limbLandmarks.point1),
+      scaledPoint(limbLandmarks.point2),
+      scaledPoint(limbLandmarks.point3),
+    ], {
+      color: '#FFD700',
+      lineWidth: 2,
+      radius: 6,
+    });
 
     const w = canvas.width;
     const h = canvas.height;
 
-    // Draw all skeleton connections using DrawingUtils
-    try {
-      if (drawingUtilsRef.current) {
-        drawingUtilsRef.current.drawLandmarks(landmarks, {
-          radius: 2,
-          color: '#00FF00',
-          fillColor: '#FF0000',
-        });
-      }
-    } catch (_e) {
-      // DrawingUtils unavailable, fall through to manual drawing
-    }
-
-    // Manual drawing for the three key limb points (always runs as primary visualization)
-    const pt1 = { x: limbLandmarks.point1.x * w, y: limbLandmarks.point1.y * h };
-    const pt2 = { x: limbLandmarks.point2.x * w, y: limbLandmarks.point2.y * h };
-    const pt3 = { x: limbLandmarks.point3.x * w, y: limbLandmarks.point3.y * h };
-
-    // Limb line
     ctx.strokeStyle = '#FFD700';
     ctx.lineWidth = 4;
     ctx.beginPath();
-    ctx.moveTo(pt1.x, pt1.y);
-    ctx.lineTo(pt2.x, pt2.y);
-    ctx.lineTo(pt3.x, pt3.y);
+    ctx.moveTo(limbLandmarks.point1.x * w, limbLandmarks.point1.y * h);
+    ctx.lineTo(limbLandmarks.point2.x * w, limbLandmarks.point2.y * h);
+    ctx.lineTo(limbLandmarks.point3.x * w, limbLandmarks.point3.y * h);
     ctx.stroke();
+  }, []); // No dependencies — uses refs only
 
-    // Key joint dots
-    [pt1, pt2, pt3].forEach((pt, i) => {
-      ctx.beginPath();
-      ctx.arc(pt.x, pt.y, i === 1 ? 8 : 6, 0, Math.PI * 2);
-      ctx.fillStyle = i === 1 ? '#FFD700' : '#FF6600';
-      ctx.fill();
-    });
+  // Desktop: MediaPipe Camera drives the loop
+  const onResultsDesktop = useCallback((results: PoseResults) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
 
-    // Angle label near joint
-    ctx.fillStyle = '#FFFFFF';
-    ctx.font = `bold ${Math.max(14, Math.round(w / 30))}px sans-serif`;
-    ctx.strokeStyle = '#000000';
-    ctx.lineWidth = 3;
-    const label = `${angle}°`;
-    ctx.strokeText(label, pt2.x + 12, pt2.y - 12);
-    ctx.fillText(label, pt2.x + 12, pt2.y - 12);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    ctx.save();
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    if (results.image) {
+      ctx.drawImage(results.image as CanvasImageSource, 0, 0, canvas.width, canvas.height);
+    } else {
+      const video = videoRef.current;
+      if (video && video.readyState >= 2) {
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      }
+    }
+
+    if (results.poseLandmarks) {
+      drawPoseOverlay(ctx, canvas, results.poseLandmarks as Landmark[]);
+    }
+    ctx.restore();
+  }, [drawPoseOverlay]);
+
+  // Mobile/iOS: store latest pose result for the rAF loop to pick up
+  const onResultsMobile = useCallback((results: PoseResults) => {
+    if (results.poseLandmarks && results.poseLandmarks.length > 0) {
+      lastPoseResultRef.current = results;
+    }
+    processingRef.current = false;
+    if (sendTimeoutRef.current !== null) {
+      clearTimeout(sendTimeoutRef.current);
+      sendTimeoutRef.current = null;
+    }
   }, []);
 
-  const startCamera = useCallback(async (poseLandmarker: PoseLandmarker) => {
+  const startMobileCamera = useCallback(async (pose: ReturnType<typeof window.Pose>) => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
     if (!video || !canvas) return;
-
-    const { width, height } = canvasSizeRef.current;
 
     try {
       const constraints: MediaStreamConstraints = {
         video: {
           facingMode: 'user',
-          width: { ideal: width, max: ios ? width : 1280 },
-          height: { ideal: height, max: ios ? height : 960 },
-          frameRate: ios
-            ? { ideal: 15, max: 30 }
-            : mobile
-              ? { ideal: 24, max: 30 }
-              : { ideal: 30, max: 60 },
+          width: { ideal: canvasSize.width, max: canvasSize.width },
+          height: { ideal: canvasSize.height, max: canvasSize.height },
+          frameRate: { ideal: 15, max: 30 },
         },
         audio: false,
       };
@@ -170,15 +238,13 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
           if (settled) return;
           settled = true;
           clearTimeout(timeout);
-          video.play().then(resolve).catch((err) => {
-            reject(new Error('Video play failed: ' + err.message));
-          });
+          video.play().then(resolve).catch(reject);
         };
         video.onerror = () => {
           if (settled) return;
           settled = true;
           clearTimeout(timeout);
-          reject(new Error('Video element error'));
+          reject(new Error('Video error'));
         };
       });
 
@@ -190,42 +256,33 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
         if (video.readyState >= 2) {
           const ctx = canvas.getContext('2d');
           if (ctx) {
-            // Mirror the video for front-facing camera
-            ctx.save();
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-            ctx.translate(canvas.width, 0);
-            ctx.scale(-1, 1);
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-            ctx.restore();
 
-            const now = performance.now();
-            const shouldSend = POSE_INTERVAL_MS === 0 || now - lastSendTimeRef.current >= POSE_INTERVAL_MS;
-
-            if (shouldSend && poseLandmarker) {
-              lastSendTimeRef.current = now;
-
-              try {
-                const result = poseLandmarker.detect(video);
-
-                if (result.landmarks && result.landmarks.length > 0) {
-                  const landmarks = result.landmarks[0];
-
-                  // Mirror the x coordinates to match the mirrored video
-                  const mirroredLandmarks: NormalizedLandmark[] = landmarks.map((lm) => ({
-                    x: 1 - lm.x,
-                    y: lm.y,
-                    z: lm.z,
-                    visibility: lm.visibility ?? 0,
-                  }));
-
-                  ctx.save();
-                  drawPoseOverlay(ctx, canvas, mirroredLandmarks);
-                  ctx.restore();
-                }
-              } catch (_e) {
-                // pose detection failed for this frame, continue
-              }
+            const lastResult = lastPoseResultRef.current;
+            if (lastResult?.poseLandmarks && lastResult.poseLandmarks.length > 0) {
+              ctx.save();
+              drawPoseOverlay(ctx, canvas, lastResult.poseLandmarks as Landmark[]);
+              ctx.restore();
             }
+          }
+
+          const now = performance.now();
+          if (!processingRef.current && now - lastSendTimeRef.current >= MOBILE_POSE_INTERVAL_MS) {
+            processingRef.current = true;
+            lastSendTimeRef.current = now;
+
+            sendTimeoutRef.current = setTimeout(() => {
+              processingRef.current = false;
+              sendTimeoutRef.current = null;
+            }, 3000);
+
+            pose.send({ image: video }).catch(() => {
+              processingRef.current = false;
+              if (sendTimeoutRef.current !== null) {
+                clearTimeout(sendTimeoutRef.current);
+                sendTimeoutRef.current = null;
+              }
+            });
           }
         }
 
@@ -238,7 +295,7 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
       setError('Не удалось подключить камеру: ' + message);
       setIsLoading(false);
     }
-  }, [drawPoseOverlay, ios, mobile]);
+  }, [canvasSize, drawPoseOverlay]);
 
   useEffect(() => {
     if (!videoRef.current || !canvasRef.current) return;
@@ -248,34 +305,45 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
 
     const initPose = async () => {
       try {
-        const vision = await FilesetResolver.forVisionTasks(
-          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm'
-        );
-
-        const poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
-          baseOptions: {
-            modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task',
-            delegate: 'GPU',
-          },
-          runningMode: 'VIDEO',
-          numPoses: 1,
-          minPoseDetectionConfidence: 0.5,
-          minPosePresenceConfidence: 0.5,
-          minTrackingConfidence: 0.5,
+        const pose = new window.Pose({
+          locateFile: (file: string) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`,
         });
 
-        poseLandmarkerRef.current = poseLandmarker;
+        pose.setOptions({
+          modelComplexity: 0,
+          smoothLandmarks: true,
+          enableSegmentation: false,
+          smoothSegmentation: false,
+          minDetectionConfidence: 0.5,
+          minTrackingConfidence: 0.5,
+          staticImageMode: false,
+        });
 
-        const canvas = canvasRef.current!;
-        const ctx = canvas.getContext('2d');
-        if (ctx) {
-          drawingUtilsRef.current = new DrawingUtils(ctx);
+        if (ios || mobile) {
+          pose.onResults(onResultsMobile);
+          poseRef.current = pose;
+          await startMobileCamera(pose);
+        } else {
+          pose.onResults(onResultsDesktop);
+          poseRef.current = pose;
+          const video = videoRef.current!;
+          const camera = new window.Camera(video, {
+            onFrame: async () => {
+              if (poseRef.current && video.videoWidth > 0) {
+                await poseRef.current.send({ image: video });
+              }
+            },
+            width: canvasSize.width,
+            height: canvasSize.height,
+            facingMode: 'user',
+          });
+          await camera.start();
+          cameraRef.current = camera;
+          setIsLoading(false);
         }
-
-        await startCamera(poseLandmarker);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        setError('Не удалось инициализировать распознавание: ' + message);
+        setError('Не удалось получить доступ к камере: ' + message);
         setIsLoading(false);
       }
     };
@@ -290,18 +358,24 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
         cancelAnimationFrame(animFrameRef.current);
         animFrameRef.current = null;
       }
+      if (sendTimeoutRef.current !== null) {
+        clearTimeout(sendTimeoutRef.current);
+        sendTimeoutRef.current = null;
+      }
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((t) => t.stop());
         streamRef.current = null;
       }
-      if (poseLandmarkerRef.current) {
-        poseLandmarkerRef.current.close();
-        poseLandmarkerRef.current = null;
+      if (cameraRef.current) {
+        cameraRef.current.stop();
+        cameraRef.current = null;
       }
-      drawingUtilsRef.current = null;
+      if (poseRef.current) {
+        poseRef.current.close();
+        poseRef.current = null;
+      }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [canvasSize, onResultsDesktop, onResultsMobile, mobile, ios, startMobileCamera]);
 
   return (
     <div className="flex items-center justify-center w-full">
