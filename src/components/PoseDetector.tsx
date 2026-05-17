@@ -59,7 +59,6 @@ function isIOS(): boolean {
 function getInitialCanvasSize() {
   const mobile = isMobileDevice();
   if (mobile) {
-    // Use smaller resolution on mobile to reduce GPU load
     const width = Math.min(window.innerWidth - 32, 480);
     const height = Math.round((width * 3) / 4);
     return { width, height };
@@ -67,8 +66,7 @@ function getInitialCanvasSize() {
   return { width: 640, height: 480 };
 }
 
-// Interval in ms between pose.send() calls on iOS/mobile to avoid GPU stall
-const MOBILE_POSE_INTERVAL_MS = 200; // ~5fps for pose inference, video still renders at 60fps
+const MOBILE_POSE_INTERVAL_MS = 200;
 
 export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -83,6 +81,7 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
   const lastSendTimeRef = useRef(0);
   const sendTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const selectedLimbRef = useRef<LimbType>(selectedLimb);
+  const onAngleUpdateRef = useRef(onAngleUpdate);
   const lastPoseResultRef = useRef<PoseResults | null>(null);
   const activeRef = useRef(true);
   const mobile = isMobileDevice();
@@ -90,9 +89,14 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
   const [canvasSize, setCanvasSize] = useState(getInitialCanvasSize);
   const initRef = useRef(false);
 
+  // Keep refs in sync with props — never cause re-renders or effect restarts
   useEffect(() => {
     selectedLimbRef.current = selectedLimb;
   }, [selectedLimb]);
+
+  useEffect(() => {
+    onAngleUpdateRef.current = onAngleUpdate;
+  }, [onAngleUpdate]);
 
   useEffect(() => {
     if (!mobile) return;
@@ -108,6 +112,7 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
     return () => window.removeEventListener('resize', updateCanvasSize);
   }, [mobile]);
 
+  // Pure canvas drawing — no React state updates, uses refs only
   const drawPoseOverlay = useCallback((ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, landmarks: Landmark[]) => {
     const limbLandmarks = getLimbLandmarks(landmarks, selectedLimbRef.current);
     if (!limbLandmarks) return;
@@ -117,7 +122,8 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
       limbLandmarks.point2,
       limbLandmarks.point3
     );
-    onAngleUpdate(angle);
+    // Use ref to avoid re-render cascade
+    onAngleUpdateRef.current(angle);
 
     const scaledLandmarks = landmarks.map((lm: Landmark) => ({
       ...lm,
@@ -162,9 +168,9 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
     ctx.lineTo(limbLandmarks.point2.x * w, limbLandmarks.point2.y * h);
     ctx.lineTo(limbLandmarks.point3.x * w, limbLandmarks.point3.y * h);
     ctx.stroke();
-  }, [onAngleUpdate]);
+  }, []); // No dependencies — uses refs only
 
-  // Desktop: MediaPipe Camera drives the loop, results include video frame
+  // Desktop: MediaPipe Camera drives the loop
   const onResultsDesktop = useCallback((results: PoseResults) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -190,12 +196,11 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
     ctx.restore();
   }, [drawPoseOverlay]);
 
-  // Mobile/iOS: store latest pose result; rAF loop draws video + overlay separately
+  // Mobile/iOS: store latest pose result for the rAF loop to pick up
   const onResultsMobile = useCallback((results: PoseResults) => {
-    if (results.poseLandmarks) {
+    if (results.poseLandmarks && results.poseLandmarks.length > 0) {
       lastPoseResultRef.current = results;
     }
-    // Clear the processing lock and the safety timeout
     processingRef.current = false;
     if (sendTimeoutRef.current !== null) {
       clearTimeout(sendTimeoutRef.current);
@@ -209,7 +214,6 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
     if (!video || !canvas) return;
 
     try {
-      // Request a lower resolution to reduce memory pressure on iOS
       const constraints: MediaStreamConstraints = {
         video: {
           facingMode: 'user',
@@ -255,20 +259,18 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
             const lastResult = lastPoseResultRef.current;
-            if (lastResult?.poseLandmarks) {
+            if (lastResult?.poseLandmarks && lastResult.poseLandmarks.length > 0) {
               ctx.save();
               drawPoseOverlay(ctx, canvas, lastResult.poseLandmarks as Landmark[]);
               ctx.restore();
             }
           }
 
-          // Throttle pose inference to avoid blocking the iOS GPU
           const now = performance.now();
           if (!processingRef.current && now - lastSendTimeRef.current >= MOBILE_POSE_INTERVAL_MS) {
             processingRef.current = true;
             lastSendTimeRef.current = now;
 
-            // Safety timeout: if pose.send() never resolves, unblock after 3s
             sendTimeoutRef.current = setTimeout(() => {
               processingRef.current = false;
               sendTimeoutRef.current = null;
@@ -308,7 +310,7 @@ export function PoseDetector({ selectedLimb, onAngleUpdate }: PoseDetectorProps)
         });
 
         pose.setOptions({
-          modelComplexity: 0, // Always use lite model — even on desktop it's fast enough
+          modelComplexity: 0,
           smoothLandmarks: true,
           enableSegmentation: false,
           smoothSegmentation: false,
